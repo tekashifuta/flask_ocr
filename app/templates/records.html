@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Stored records - Flask OCR{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">Records view</p>
+      <h1>Stored records</h1>
+    </div>
+    <div class="result-actions">
+      {% if database.connected %}
+        <span class="badge badge-embedded">Connected</span>
+      {% else %}
+        <span class="badge badge-ocr">Not connected</span>
+      {% endif %}
+      <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Database setup</a>
+    </div>
+  </div>
+
+  <p class="lede">
+    Everything extracted into <code>{{ database.settings.database }}</code>.<code>{{ database.settings.table }}</code>
+    - search by file name, by a word from the stored text, or by record number
+    (<code>42</code>), then open a record to read, copy or download it.
+  </p>
+
+  {% include "_records.html" %}
+
+  <p class="engine-note">
+    The search runs in {{ store.label }} with a bound, escaped <code>LIKE</code> pattern - no
+    wildcards of your own are passed on - and the table lists <strong>every stored
+    record</strong>: one page reads at most {{ records_view.max_limit }} rows, so a store
+    bigger than that pages at that cap with <strong>Previous</strong>/<strong>Next</strong>
+    and the page numbers underneath (each page is one <code>LIMIT</code>/<code>OFFSET</code>
+    query, and the match count comes from the same search criteria). Keep
+    <strong>Rows per page</strong> on <strong>All</strong> to see everything, or pick
+    10/25/50/100 to page through it. Records deleted here cascade to
+    <code>{{ database.settings.pages_table }}</code>. <strong>Export .xlsx</strong>
+    downloads the rows shown here as an Excel workbook (one row per record with its
+    full text, one row per stored page, plus which filters produced the file) -
+    built in memory, nothing is written to disk.
+  </p>
+</section>
+{% endblock %}

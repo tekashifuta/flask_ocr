@@ -1,0 +1,162 @@
+{# Shared records view: the search toolbar, the table of stored extractions and the
+   page buttons.  Included by ``database.html`` and ``records.html`` - both pass
+   ``records_view`` (the rows, filters, paging, summary; every stored record unless
+   the toolbar narrows the page) and ``database`` (connection status/row count).
+   ``records_view.action`` says which page this is, so the "nothing connected" copy
+   can point at the connection form when it is not on this page. #}
+{% set connection_form_above = records_view.action == 'main.database_page' %}
+{% if records_view.error %}
+  <p class="notice notice-warning">{{ records_view.error }}</p>
+{% endif %}
+
+<form class="records-search" action="{{ url_for(records_view.action) }}" method="get" role="search">
+  <label class="field field-search">
+    <span>Search stored records</span>
+    <input type="search" name="q" value="{{ records_view.q }}" autocomplete="off"
+           maxlength="{{ records_view.max_search_chars }}"
+           placeholder="File name, extracted text or record #">
+  </label>
+  <label class="field field-scope">
+    <span>Search in</span>
+    <select name="scope">
+      {% for value, label in records_view.scopes %}
+        <option value="{{ value }}"{% if value == records_view.scope %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field field-rows">
+    <span>Rows per page</span>
+    <select name="limit">
+      {% for value, label in records_view.limit_choices %}
+        <option value="{{ value }}"{% if value == records_view.limit_choice %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="records-search-actions">
+    <button class="button button-primary" type="submit">Search</button>
+    {% if records_view.records %}
+      <a class="button button-ghost" href="{{ records_view.export_url }}"
+         title="Download the {{ records_view.count }} row{{ '' if records_view.count == 1 else 's' }} shown here as an Excel workbook">
+        Export .xlsx
+      </a>
+    {% endif %}
+    {% if records_view.searching %}
+      <a class="button button-ghost" href="{{ url_for(records_view.action) }}">Reset</a>
+    {% endif %}
+  </div>
+</form>
+
+<p class="records-summary">
+  {%- if not database.connected -%}
+    {%- if connection_form_above -%}
+      Connect to {{ store.server_phrase }} above to search the stored records.
+    {%- else -%}
+      Nothing is connected yet, so no extraction is stored -
+      <a href="{{ url_for('main.database_page') }}">connect to {{ store.server_phrase }}</a>
+      to search the records.
+    {%- endif -%}
+  {%- elif records_view.searching -%}
+    {{ records_view.total }} match{{ '' if records_view.total == 1 else 'es' }}
+    for &ldquo;{{ records_view.q }}&rdquo; in {{ records_view.scope_label|lower }}
+    {%- if records_view.pages > 1 %}, rows {{ records_view.range_label }}
+      (page {{ records_view.page }} of {{ records_view.pages }}){%- endif %}.
+  {%- elif records_view.count -%}
+    {%- if records_view.pages > 1 -%}
+      Showing rows {{ records_view.range_label }} of {{ records_view.total }} stored
+      records (page {{ records_view.page }} of {{ records_view.pages }}).
+    {%- elif records_view.showing_all -%}
+      All {{ records_view.total }} stored record{{ '' if records_view.total == 1 else 's' }}.
+    {%- else -%}
+      Newest {{ records_view.count }} of {{ database.record_count if database.record_count is not none else records_view.total }}
+      stored records.
+    {%- endif -%}
+  {%- endif -%}
+</p>
+
+<div class="records-wrap">
+  <table class="records">
+    <thead>
+      <tr>
+        <th>#</th><th>File name</th><th>Uploaded (UTC)</th><th>Type</th>
+        <th>Pages</th><th>Chars</th><th>Conf.</th><th>Snippet</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for record in records_view.records %}
+      <tr>
+        <td>{{ record.id }}</td>
+        <td class="cell-file">
+          <a href="{{ url_for('main.database_record', record_id=record.id) }}">{{ record.filename }}</a>
+        </td>
+        <td>{{ record.uploaded_at }}</td>
+        <td>{{ record.kind }}</td>
+        <td>{{ record.page_count }}</td>
+        <td>{{ record.char_count }}</td>
+        <td>{% if record.confidence is not none %}{{ record.confidence }}%{% else %}&mdash;{% endif %}</td>
+        <td class="cell-preview">{% if record.preview %}{{ record.preview|trim }}{% else %}&mdash;{% endif %}</td>
+        <td class="cell-actions">
+          <a class="button button-tiny"
+             href="{{ url_for('main.database_record_download', record_id=record.id) }}">.txt</a>
+          <form action="{{ url_for('main.database_record_delete', record_id=record.id) }}"
+                method="post">
+            <input type="hidden" name="next" value="{{ request.full_path }}">
+            <button class="button button-tiny" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr>
+        <td colspan="9" class="records-empty">
+          {% if not database.connected %}
+            {%- if connection_form_above -%}
+              Connect to {{ store.server_phrase }} above to see (and store) extractions.
+            {%- else -%}
+              Nothing is connected yet, so extractions are not being stored - open
+              <a href="{{ url_for('main.database_page') }}">{{ store.label }} storage</a>
+              to connect a store (the local SQLite file needs nothing installed) and
+              upload again.
+            {%- endif -%}
+          {% elif records_view.error %}
+            The rows could not be read from the server.
+          {% elif records_view.searching %}
+            No stored record matches that search - try fewer or different words.
+          {% else %}
+            Nothing stored yet - extract a document and it will show up here.
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if records_view.pages > 1 %}
+<nav class="records-pagination" aria-label="Stored records pages">
+  {% if records_view.prev_url %}
+    <a class="button button-ghost button-tiny" href="{{ records_view.prev_url }}" rel="prev">&laquo; Previous</a>
+  {% else %}
+    <span class="button button-ghost button-tiny is-disabled" aria-disabled="true">&laquo; Previous</span>
+  {% endif %}
+  {% for link in records_view.page_links %}
+    {% if link.page %}
+      {% if link.current %}
+        <span class="button button-tiny is-current" aria-current="page">{{ link.page }}</span>
+      {% else %}
+        <a class="button button-tiny" href="{{ link.url }}">{{ link.page }}</a>
+      {% endif %}
+    {% else %}
+      <span class="records-pagination-gap" aria-hidden="true">&hellip;</span>
+    {% endif %}
+  {% endfor %}
+  {% if records_view.next_url %}
+    <a class="button button-ghost button-tiny" href="{{ records_view.next_url }}" rel="next">Next &raquo;</a>
+  {% else %}
+    <span class="button button-ghost button-tiny is-disabled" aria-disabled="true">Next &raquo;</span>
+  {% endif %}
+  <span class="records-pagination-info">
+    Page {{ records_view.page }} of {{ records_view.pages }} &middot;
+    {{ records_view.total }} record{{ '' if records_view.total == 1 else 's' }}
+  </span>
+</nav>
+{% endif %}
+

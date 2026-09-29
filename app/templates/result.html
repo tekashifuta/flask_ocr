@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}{{ result.filename }} - extracted text{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">{{ result.kind|upper }} upload</p>
+      <h1>{{ result.filename }}</h1>
+    </div>
+    <div class="result-actions">
+      <button class="button button-primary" type="button" data-copy-target="full-text">
+        Copy all text
+      </button>
+      <a class="button button-ghost"
+         href="{{ url_for('main.download_result', result_id=result_id) }}">Download .txt</a>
+      <a class="button button-ghost" href="{{ url_for('main.index') }}">New upload</a>
+    </div>
+  </div>
+
+  <dl class="stats">
+    <div><dt>Pages</dt><dd>{{ result.page_count }}</dd></div>
+    <div><dt>Characters</dt><dd>{{ result.char_count }}</dd></div>
+    <div><dt>Words</dt><dd>{{ result.word_count }}</dd></div>
+    <div><dt>Elapsed</dt><dd>{{ result.duration_ms }} ms</dd></div>
+    <div>
+      <dt>Confidence</dt>
+      <dd>{% if result.confidence is not none %}{{ result.confidence }}%{% else %}&mdash;{% endif %}</dd>
+    </div>
+    <div>
+      <dt>Source</dt>
+      <dd>{{ result.embedded_page_count }} text layer / {{ result.ocred_page_count }} OCR</dd>
+    </div>
+  </dl>
+
+  <p class="engine-note">
+    Engine: Tesseract
+    {%- if result.tesseract_version %} {{ result.tesseract_version }}{% endif %}
+    (language <code>{{ result.languages }}</code>) &middot;
+    {{ result.size_bytes }} bytes analysed
+  </p>
+
+  {% if database_record_id %}
+    <p class="notice notice-info">
+      Saved to {{ store.label }} as
+      <a href="{{ url_for('main.database_record', record_id=database_record_id) }}">record
+      #{{ database_record_id }}</a> - file name, upload date/time (UTC) and the extracted
+      content are stored page by page.
+    </p>
+  {% elif database_error %}
+    <p class="notice notice-warning">
+      The text was extracted, but storing it in {{ store.label }} failed: {{ database_error }}
+      <a href="{{ url_for('main.database_page') }}">Open the database page</a>.
+    </p>
+  {% endif %}
+
+  {% if result.is_empty %}
+    <p class="notice notice-warning">
+      No text could be detected in this document. Very low contrast scans or
+      handwriting often produce empty results - try a higher resolution image.
+    </p>
+  {% endif %}
+
+  {% if result.preview_data_uri %}
+    <figure class="preview">
+      <img src="{{ result.preview_data_uri }}" alt="Preview of {{ result.filename }}">
+      <figcaption>First page preview</figcaption>
+    </figure>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Extracted text</h2>
+  <textarea id="full-text" class="visually-hidden" readonly>{{ result.full_text() }}</textarea>
+
+  {% for page in result.pages %}
+  <article class="page-card">
+    <header class="page-card-head">
+      <h3>
+        {% if result.page_count > 1 %}Page {{ page.page_number }} of {{ result.page_count }}
+        {% else %}Extracted text{% endif %}
+      </h3>
+      <div class="page-meta">
+        <span class="badge badge-{{ page.method }}">
+          {{ 'OCR' if page.method == 'ocr' else 'Text layer' }}
+        </span>
+        <span>{{ page.char_count }} chars</span>
+        {% if page.confidence is not none %}<span>{{ page.confidence }}% conf.</span>{% endif %}
+        {% if page.duration_ms %}<span>{{ page.duration_ms }} ms</span>{% endif %}
+        <button class="button button-tiny" type="button" data-copy-target="page-text-{{ page.page_number }}">
+          Copy
+        </button>
+      </div>
+    </header>
+    {% if page.text %}
+      <pre class="ocr-text" id="page-text-{{ page.page_number }}">{{ page.text }}</pre>
+    {% else %}
+      <p class="empty-page">No text detected on this page.</p>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+
+<p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite" hidden>
+  Copied to the clipboard.
+</p>
+{% endblock %}

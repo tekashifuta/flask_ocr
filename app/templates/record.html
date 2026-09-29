@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Record #{{ record.id }} - {{ record.filename }}{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">Stored in {{ store.label }} &middot; record #{{ record.id }}</p>
+      <h1>{{ record.filename }}</h1>
+    </div>
+    <div class="result-actions">
+      <button class="button button-primary" type="button" data-copy-target="stored-text">
+        Copy all text
+      </button>
+      <a class="button button-ghost"
+         href="{{ url_for('main.database_record_download', record_id=record.id) }}">Download .txt</a>
+      <a class="button button-ghost"
+         href="{{ url_for('main.database_record_export', record_id=record.id) }}">Download .xlsx</a>
+      <a class="button button-ghost" href="{{ url_for('main.database_records_page') }}">All records</a>
+    </div>
+  </div>
+
+  <dl class="stats">
+    <div><dt>Record</dt><dd>#{{ record.id }}</dd></div>
+    <div><dt>Uploaded (UTC)</dt><dd class="stat-time">{{ record.uploaded_at }}</dd></div>
+    <div><dt>Type</dt><dd>{{ record.kind }}</dd></div>
+    <div><dt>Pages</dt><dd>{{ record.page_count }}</dd></div>
+    <div><dt>Characters</dt><dd>{{ record.char_count }}</dd></div>
+    <div><dt>Words</dt><dd>{{ record.word_count }}</dd></div>
+    <div>
+      <dt>Confidence</dt>
+      <dd>{% if record.confidence is not none %}{{ record.confidence }}%{% else %}&mdash;{% endif %}</dd>
+    </div>
+    <div><dt>Elapsed</dt><dd>{{ record.duration_ms }} ms</dd></div>
+  </dl>
+
+  <p class="engine-note">
+    {% if database.provider == 'sqlite' %}File{% else %}Schema{% endif %}
+    <code>{{ database.settings.database }}</code> &middot;
+    table <code>{{ database.settings.table }}</code> &middot;
+    language <code>{{ record.ocr_language or "unknown" }}</code> &middot;
+    engine {{ record.engine_version or "unknown" }} &middot;
+    {{ record.size_bytes }} bytes analysed
+    {%- if record.stored_at %}, stored {{ record.stored_at }}{% endif %} &middot;
+    SHA-256 <code>{{ record.content_sha256 or "n/a" }}</code>
+  </p>
+
+  {% if record.pages %}
+    <h2>Stored pages</h2>
+    {% for page in record.pages %}
+    <article class="page-card">
+      <header class="page-card-head">
+        <h3>Page {{ page.page_number }} of {{ record.pages|length }}</h3>
+        <div class="page-meta">
+          <span class="badge badge-{{ page.method }}">
+            {{ 'OCR' if page.method == 'ocr' else 'Text layer' }}
+          </span>
+          <span>{{ page.char_count }} chars</span>
+          {% if page.confidence is not none %}<span>{{ page.confidence }}% conf.</span>{% endif %}
+          {% if page.duration_ms %}<span>{{ page.duration_ms }} ms</span>{% endif %}
+          <button class="button button-tiny" type="button"
+                  data-copy-target="stored-page-{{ page.page_number }}">Copy</button>
+        </div>
+      </header>
+      {% if page.content %}
+        <pre class="ocr-text" id="stored-page-{{ page.page_number }}">{{ page.content }}</pre>
+      {% else %}
+        <p class="empty-page">No text was stored for this page.</p>
+      {% endif %}
+    </article>
+    {% endfor %}
+  {% endif %}
+
+  <form action="{{ url_for('main.database_record_delete', record_id=record.id) }}" method="post"
+        class="actions">
+    <input type="hidden" name="next" value="{{ url_for('main.database_records_page') }}">
+    <button class="button button-ghost" type="submit">Delete this record</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Extracted content</h2>
+  <textarea id="stored-text" class="visually-hidden" readonly>{{ record.content }}</textarea>
+  <pre class="ocr-text">{{ record.content or "No text was stored for this record." }}</pre>
+</section>
+
+<p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite" hidden>
+  Copied to the clipboard.
+</p>
+{% endblock %}

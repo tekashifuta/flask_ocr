@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block title %}{{ store.label }} storage - Flask OCR{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">Database storage</p>
+      <h1>{{ store.label }} storage</h1>
+    </div>
+    <div class="result-actions">
+      {% if database.connected %}
+        <span class="badge badge-embedded">Connected</span>
+      {% else %}
+        <span class="badge badge-ocr">Not connected</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <p class="lede">
+    Where the extracted text is kept: a <strong>relational database</strong> - a MySQL
+    server, or one local SQLite file - so results survive a restart and can be queried
+    with plain SQL. Either store creates what it needs on connect, and the
+    <a href="{{ url_for('main.database_records_page') }}">records view</a> searches
+    every stored file name and its extracted text. Nothing is contacted until you
+    connect, and a store that is not there never costs you an extraction: the text is
+    still shown, with a warning next to it.
+  </p>
+
+  {% if error %}<p class="notice notice-error">{{ error }}</p>{% endif %}
+  {% if message %}<p class="notice notice-info">{{ message }}</p>{% endif %}
+
+  <h2>MySQL server</h2>
+  <p class="lede">
+    Point the application at any reachable MySQL server. On connect the schema is
+    created for you: <code>{{ form.database }}</code> is created when missing
+    (<code>CREATE DATABASE IF NOT EXISTS</code>) and the tables
+    <code>{{ form.table }}</code> (one row per upload: file name, upload date/time and
+    the extracted content) and <code>{{ form.pages_table }}</code> (one row per page)
+    are created with <code>CREATE TABLE IF NOT EXISTS</code>.
+  </p>
+
+  {% if not database.driver.available %}
+    <p class="notice notice-warning">
+      The MySQL driver is not installed, so no MySQL connection can be made.
+      {{ database.install_hint }} The SQLite panel below works without it.
+    </p>
+  {% endif %}
+
+  <form class="db-form" id="database-form" action="{{ url_for('main.database_connect') }}"
+        method="post">
+    <input type="hidden" name="backend" value="mysql">
+    <div class="form-grid">
+      <label class="field">
+        <span>Host</span>
+        <input id="db-host" name="host" type="text" value="{{ form.host }}"
+               placeholder="127.0.0.1 or db.example.com" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span>Port</span>
+        <input id="db-port" name="port" type="number" min="1" max="65535"
+               value="{{ form.port }}" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>User</span>
+        <input id="db-user" name="user" type="text" value="{{ form.user }}"
+               autocomplete="username" required>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="db-password" name="password" type="password" value=""
+               autocomplete="current-password">
+      </label>
+      <label class="field">
+        <span>Database (schema)</span>
+        <input id="db-database" name="database" type="text" value="{{ form.database }}"
+               autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Extractions table</span>
+        <input id="db-table" name="table" type="text" value="{{ form.table }}"
+               autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Pages table</span>
+        <input id="db-pages-table" name="pages_table" type="text"
+               value="{{ form.pages_table }}" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Charset</span>
+        <input id="db-charset" name="charset" type="text" value="{{ form.charset }}"
+               autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Connect timeout (s)</span>
+        <input id="db-timeout" name="connect_timeout" type="number" min="1" max="120"
+               value="{{ form.connect_timeout }}" autocomplete="off">
+      </label>
+    </div>
+
+    <p class="field-hint">
+      {% if form.has_password %}
+        A password is stored for <code>{{ form.label }}</code> - leave the field blank
+        to reuse it.
+      {% else %}
+        Leave the password blank when the MySQL user has none.
+      {% endif %}
+    </p>
+
+    <label class="checkbox">
+      <input type="hidden" name="remember" value="0">
+      <input id="db-remember" type="checkbox" name="remember" value="1"
+             {% if form.saved or not database.saved_settings %}checked{% endif %}>
+      <span>Remember these details{% if database.settings_file %} (stored in
+        <code>{{ database.settings_file }}</code>, never served to the browser){% endif %}</span>
+    </label>
+
+    <div class="actions">
+      <button class="button button-primary" type="submit" id="database-submit">
+        <span class="button-label">Connect &amp; create schema</span>
+        <span class="spinner" hidden aria-hidden="true"></span>
+      </button>
+      <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Reset form</a>
+    </div>
+  </form>
+
+  <p class="form-status" id="database-form-status" role="status" aria-live="polite" hidden></p>
+</section>
+
+<section class="panel panel-muted">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">No server needed</p>
+      <h2>Use a local SQLite file</h2>
+    </div>
+    {% if database.connected and database.provider == 'sqlite' %}
+      <span class="badge badge-embedded">Connected</span>
+    {% endif %}
+  </div>
+
+  <p class="lede">
+    The same two tables, in one file, through the standard library's
+    <code>sqlite3</code>: nothing to install, no credentials, no server. The file, its
+    tables and its indexes are created on connect, exactly like the MySQL schema. This
+    is the store to use for tests and local work, and it is also what
+    <code>DATABASE_BACKEND=auto</code> falls back to at start-up when MySQL is not
+    reachable. Set <code>SQLITE_PATH</code> to make another location the default.
+  </p>
+
+  <form class="db-form" action="{{ url_for('main.database_connect') }}" method="post">
+    <input type="hidden" name="backend" value="sqlite">
+    <div class="form-grid">
+      <label class="field">
+        <span>SQLite file</span>
+        <input id="sqlite-path" name="path" type="text" autocomplete="off"
+               value="{{ form.path or database.backends.sqlite.path or '' }}"
+               placeholder="instance/{{ 'ocr_records.sqlite3' }} or :memory:">
+      </label>
+    </div>
+
+    <p class="field-hint">
+      A relative path is resolved from the directory the application runs in, and
+      <code>:memory:</code> keeps everything in RAM (gone when the process exits -
+      handy for a quick check). The tables default to
+      <code>{{ database.backends.sqlite.settings.table }}</code> and
+      <code>{{ database.backends.sqlite.settings.pages_table }}</code>.
+    </p>
+
+    <div class="actions">
+      <button class="button button-ghost" type="submit">Connect SQLite file</button>
+    </div>
+  </form>
+</section>
+
+<aside class="panel panel-muted">
+  <h2>Connection status</h2>
+  <dl class="facts">
+    <div>
+      <dt>Store</dt>
+      <dd>{{ store.label }}{% if database.backend != database.provider %} <code>DATABASE_BACKEND={{ database.backend }}</code>{% endif %}</dd>
+    </div>
+    <div>
+      <dt>Driver</dt>
+      <dd>
+        {%- if database.provider == 'sqlite' -%}
+          {{ database.backends.sqlite.driver.name }}{% if database.server_version %} {{ database.server_version }}{% endif %} (standard library)
+        {%- else -%}
+          {{ database.driver.name }}{% if database.driver.version %} {{ database.driver.version }}{% endif %}{% if not database.driver.available %} (missing){% endif %}
+        {%- endif -%}
+      </dd>
+    </div>
+    <div><dt>Connected</dt><dd>{{ "yes" if database.connected else "no" }}</dd></div>
+    <div>
+      <dt>{% if database.provider == 'sqlite' %}File{% else %}Server{% endif %}</dt>
+      <dd>{{ database.connection_label or database.settings.label }}</dd>
+    </div>
+    <div>
+      <dt>{% if database.provider == 'sqlite' %}SQLite version{% else %}MySQL version{% endif %}</dt>
+      <dd>{{ database.server_version or "unknown" }}</dd>
+    </div>
+    <div>
+      <dt>{% if database.provider == 'sqlite' %}File{% else %}Schema{% endif %}</dt>
+      <dd>{{ database.settings.database }}</dd>
+    </div>
+    <div><dt>Tables</dt><dd>{{ database.settings.table }} + {{ database.settings.pages_table }}</dd></div>
+    <div><dt>Stored records</dt><dd>{{ database.record_count if database.record_count is not none else "unknown" }}</dd></div>
+    <div><dt>Saved MySQL details</dt><dd>{{ "yes" if database.saved_settings else "no" }}</dd></div>
+    {% if database.backends.sqlite.path %}
+      <div><dt>SQLite fallback</dt><dd>{{ database.backends.sqlite.path }}</dd></div>
+    {% endif %}
+    {% if database.connected_at %}<div><dt>Connected at</dt><dd>{{ database.connected_at }}</dd></div>{% endif %}
+    {% if database.last_error %}<div><dt>Last error</dt><dd class="cell-error">{{ database.last_error }}</dd></div>{% endif %}
+  </dl>
+
+  <div class="actions">
+    {% if database.connected %}
+      <form action="{{ url_for('main.database_ensure_schema') }}" method="post">
+        <button class="button button-ghost" type="submit">Create missing tables</button>
+      </form>
+      <form action="{{ url_for('main.database_disconnect') }}" method="post">
+        <button class="button button-ghost" type="submit">Disconnect</button>
+      </form>
+    {% endif %}
+    {% if database.saved_settings %}
+      <form action="{{ url_for('main.database_forget') }}" method="post">
+        <button class="button button-ghost" type="submit">Forget saved details</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <p class="engine-note">
+    Timestamps are stored in UTC. <code>DATABASE_BACKEND</code> picks the store
+    (<code>auto</code>, <code>mysql</code> or <code>sqlite</code>); values from the
+    environment (<code>MYSQL_HOST</code>, <code>MYSQL_USER</code>,
+    <code>MYSQL_PASSWORD</code>, ...) pre-fill the form above and
+    <code>SQLITE_PATH</code> sets the file below.
+    <code>DATABASE_AUTO_CONNECT=1</code> connects at start-up - falling back to the
+    SQLite file in <code>auto</code> mode when MySQL is not there - and
+    <code>DATABASE_AUTO_SAVE=0</code> turns automatic saving off.
+  </p>
+</aside>
+
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <h2>Stored extractions</h2>
+    </div>
+    <div class="result-actions">
+      <a class="button button-ghost" href="{{ url_for('main.database_records_page') }}">Records view</a>
+    </div>
+  </div>
+  {% include "_records.html" %}
+</section>
+{% endblock %}

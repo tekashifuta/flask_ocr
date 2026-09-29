@@ -1,0 +1,31 @@
+# Virtual environments
+env/
+.venv/
+venv/
+
+# Python artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Flask instance folder (runtime state only - uploads are never persisted)
+instance/
+
+# SQLite store (the schema is created on connect; never commit a database file)
+*.sqlite3
+*.sqlite
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Extracted text downloads
+*.ocr.txt
+*.db.txt

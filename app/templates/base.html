@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Flask OCR Text Extractor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="{{ url_for('main.index') }}">
+      <span class="brand-mark">OCR</span>
+      <span class="brand-text">Flask OCR Text Extractor</span>
+    </a>
+    <nav class="site-nav">
+      <a href="{{ url_for('main.index') }}">Upload</a>
+      <a href="{{ url_for('main.database_page') }}">Database</a>
+      <a href="{{ url_for('main.database_records_page') }}">Records</a>
+      <a href="{{ url_for('main.api_health') }}">Engine health</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <p>
+      Flask + Tesseract + PDFium. Uploaded documents are processed in memory and
+      never written to disk; the extracted text is optionally stored in
+      {{ store.label }} when you connect {{ store.server_phrase }} from the
+      <a href="{{ url_for('main.database_page') }}">Database</a> page.
+    </p>
+  </footer>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>

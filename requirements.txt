@@ -1,0 +1,20 @@
+# Runtime dependencies.
+# Versions verified against Python 3.14 on Windows (Pillow and pypdfium2 ship
+# 3.14 compatible wheels); everything also runs on 3.10+.
+
+Flask>=3.1,<4
+Pillow>=11,<13
+pypdfium2>=5,<6
+pytesseract>=0.3.13,<0.4
+
+# Optional MySQL sink for extracted text (pure Python, no build tools needed).
+# Leave it installed even if you only use the in-memory result cache: the
+# /database page reports the driver state instead of failing at import time.
+# The SQLite backend needs nothing from here - sqlite3 is part of Python.
+PyMySQL>=1.1,<2
+
+# NOTE: Tesseract itself is a system binary, not a pip package.
+#   Windows : winget install -e --id UB-Mannheim.TesseractOCR
+#   macOS   : brew install tesseract
+#   Debian  : sudo apt install tesseract-ocr
+# See README.md for details and the TESSERACT_CMD override.

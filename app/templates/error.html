@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Something went wrong - Flask OCR{% endblock %}
+
+{% block content %}
+<section class="panel panel-error">
+  <p class="eyebrow">Error {{ status_code }}</p>
+  <h1>{{ error }}</h1>
+  <p class="error-code">Reference: <code>{{ error_code }}</code></p>
+
+  <div class="actions">
+    <a class="button button-primary" href="{{ url_for('main.index') }}">Back to the upload form</a>
+    <a class="button button-ghost" href="{{ url_for('main.api_health') }}">Check the OCR engine</a>
+  </div>
+
+  {% if status_code == 503 %}
+    <p class="notice notice-warning">
+      If Tesseract is not installed yet, install it and restart the server - the
+      README explains the one-line install for Windows, macOS and Linux.
+    </p>
+  {% endif %}
+</section>
+
+<aside class="panel panel-muted">
+  <h2>Accepted input</h2>
+  <dl class="facts">
+    <div><dt>Allowed types</dt><dd>{{ limits.allowed_extensions }}</dd></div>
+    <div><dt>Max size</dt><dd>{{ limits.max_upload }}</dd></div>
+    <div><dt>Max PDF pages</dt><dd>{{ limits.max_pdf_pages }}</dd></div>
+  </dl>
+</aside>
+{% endblock %}

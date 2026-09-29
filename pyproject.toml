@@ -1,0 +1,9 @@
+# Test configuration only - this project runs from a checkout, it is not packaged.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Makes `import app` work when pytest is called as `pytest` (not `python -m pytest`).
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+    "ocr: end-to-end tests that require a working Tesseract installation",
+]
