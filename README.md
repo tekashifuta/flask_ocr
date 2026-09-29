@@ -16,6 +16,12 @@ download) plus a JSON API for automation.
 | Verified on | Python 3.14.6 / Windows, Tesseract 5.4.0, Flask 3.1.3, Pillow 12.3.0, pypdfium2 5.13.0, PyMySQL 1.2.3 |
 | Privacy | Documents are processed **in memory** and never written to disk |
 
+**Where to find what:** `sql/` holds the database scripts (schema + seed data),
+`samples/` the files the application was tested with, `tools/` the scripts that
+generate the samples, verify them and build the submission ZIP. §12 lists every
+tool and version (including the AI assistance used), §13 the assumptions,
+limitations and known issues, and §14 the deliverables and how they were verified.
+
 ## 1. Install Tesseract
 
 Tesseract is a native binary, not a Python package.
@@ -143,8 +149,13 @@ exist:
 ```sql
 CREATE DATABASE IF NOT EXISTS `flask_ocr` CHARACTER SET utf8mb4;
 CREATE TABLE IF NOT EXISTS `ocr_extractions` ( ... );       -- one row per upload
-CREATE TABLE IF NOT EXISTS `ocr_extraction_pages` ( ... );  -- one row per page
+CREATE TABLE IF NOT EXISTS `ocr_extractions_pages` ( ... ); -- one row per page
 ```
+
+The parent table is `MYSQL_TABLE` (default `ocr_extractions`) and the page table
+is that name plus `_pages` (`PAGES_TABLE_SUFFIX`), so a renamed table keeps its
+matching page table. `sql/mysql_schema.sql` is the same DDL - with the seed data
+- as a script you can run by hand (§14).
 
 The MySQL user therefore needs `CREATE` on the server; a user with only
 `SELECT`/`INSERT` also works when the schema has been created by someone else.
@@ -166,7 +177,7 @@ env\Scripts\python.exe run.py
 
 | | |
 |---|---|
-| Tables | `ocr_extractions` and `ocr_extraction_pages` - the same columns as MySQL, one row per upload / per page |
+| Tables | `ocr_extractions` and `ocr_extractions_pages` - the same columns as MySQL, one row per upload / per page |
 | Created by | `CREATE TABLE IF NOT EXISTS` on connect plus three indexes; `PRAGMA foreign_keys = ON` makes the page rows cascade on delete |
 | Path | `SQLITE_PATH`, otherwise `instance/ocr_records.sqlite3` (git-ignored); `:memory:` gives a throw-away database |
 | Timestamps | `YYYY-MM-DD HH:MM:SS.ffffff` **UTC** text - sortable, and no deprecated datetime adapter involved |
@@ -211,7 +222,7 @@ field at all (the JSON API) keeps the `DATABASE_AUTO_SAVE` default.
 | `content_sha256` | SHA-256 of `content` - handy for de-duplicating |
 | `stored_at` | When the row was written (`TIMESTAMP`) |
 
-`ocr_extraction_pages` - one row per page (`extraction_id`, `page_number`,
+`ocr_extractions_pages` - one row per page (`extraction_id`, `page_number`,
 `method` = `ocr`/`embedded`, `content`, counts, confidence, duration) with
 `FOREIGN KEY ... ON DELETE CASCADE`, so deleting an extraction removes its pages.
 
@@ -275,7 +286,7 @@ the current search, scope, row limit and page are applied - as an Excel workbook
 | Sheet | Contents |
 |---|---|
 | `Records` | One row per stored extraction: id, file name, upload time (UTC), type, pages, characters, words, confidence, duration, size, language, engine, storage time, SHA-256 and the **full extracted text** (the table itself only lists a snippet) |
-| `Pages` | One row per page of those records - the `ocr_extraction_pages` rows, so the per-page result survives the export. Left out when there are none |
+| `Pages` | One row per page of those records - the `ocr_extractions_pages` rows, so the per-page result survives the export. Left out when there are none |
 | `Export` | Which filters produced the file (term, scope, row limit, page, server, schema/table, row count), so a spreadsheet that travels by e-mail explains itself |
 
 The header row is frozen and filterable, columns are sized to their content, numbers
@@ -514,6 +525,12 @@ flask_ocr/
 │  │  └─ documents.py         # kind detection, image path, hybrid PDF path
 │  ├─ templates/              # base / index / result / database / records (+ partials)
 │  └─ static/                 # style.css, app.js (no CDN - works offline)
+├─ sql/                       # standalone schema + seed data (MySQL and SQLite)
+├─ samples/                   # the files the app was tested with (+ samples/README.md)
+├─ tools/
+│  ├─ make_samples.py         # regenerates samples/ (no downloads, no binaries in git)
+│  ├─ verify_samples.py       # uploads every sample through the app and checks the result
+│  └─ package_submission.py   # builds the submission ZIP (dist/flask_ocr_submission.zip)
 └─ tests/                     # pytest suite, OCR tests skip without Tesseract
 ```
 
@@ -684,5 +701,206 @@ the file on disk - needs the `tmp_path` file.
   traffic install a production WSGI server
   (`pip install waitress` then `waitress-serve --call "app:create_app"`) and run
   one worker per core.
+
+## 12. Tools, versions and AI assistance
+
+### Tools, frameworks and libraries
+
+Everything below was verified together on **Python 3.14.6 / Windows 11
+(10.0.26100)**. The application itself runs on Python 3.10+.
+
+| Layer | Component | Version | Notes |
+|---|---|---|---|
+| Language | **Python** | 3.14.6 (3.10+) | `env\Scripts\python.exe` in this checkout |
+| **OCR engine** | **Tesseract OCR** | 5.4.0.20240606 (Leptonica 1.84.1) | native binary, not a pip package - `winget install -e --id UB-Mannheim.TesseractOCR`; installed languages: `eng`, `osd` |
+| OCR binding | pytesseract | 0.3.13 | one `image_to_data` call per page (TSV -> text + confidence) |
+| PDF engine | PDFium via pypdfium2 | pypdfium2 5.13.0 (PDFium 153.0.7999.0) | renders pages *and* reads embedded text - no Poppler |
+| Image handling | Pillow | 12.3.0 | decode/verify, EXIF rotate, preprocessing, first-page preview, sample generation |
+| Web framework | Flask | 3.1.3 | application factory + single blueprint |
+| WSGI toolkit | Werkzeug | 3.1.9 | multipart parsing, `MAX_CONTENT_LENGTH` |
+| Templating | Jinja2 (+ MarkupSafe) | 3.1.6 (+ 3.0.3) | server rendered pages |
+| Remaining Flask deps | itsdangerous 2.2.0, blinker 1.9.0, click 8.5.0 | | installed with Flask |
+| **Database** (optional server) | **MySQL 8.0** + PyMySQL 1.2.3 | PyMySQL 1.2.3 | pure-Python driver (no compiler needed). **No MySQL server is installed on the development machine** - see §13 |
+| **Database** (default store) | **SQLite** | 3.50.4, via the standard library `sqlite3` of Python 3.14.6 | one file, no server, no credentials, nothing to install |
+| Excel export | *standard library only* | `zipfile` + `xml` | no pandas, no openpyxl (see §5) |
+| Front end | *none* | hand written CSS + vanilla JavaScript | no CDN, no build step, works offline |
+| Tests | pytest | 9.1.1 | 224 tests |
+| Packaging | *standard library only* | `zipfile` via `tools/package_submission.py` | builds the submission archive |
+| Development machine | Windows 11 (10.0.26100), VS Code | | `winget` used for Tesseract, `py -3.14 -m venv` for the environment |
+
+The complete pinned list is `requirements.txt` (runtime) and
+`requirements-dev.txt` (adds pytest).
+
+### AI tools used
+
+The brief allows AI assistance as long as it is disclosed and understood. The
+following was used while building this project:
+
+| Tool | How it was used |
+|---|---|
+| **Cline** (AI coding agent in VS Code) | Drafted and refactored implementation code (`app/ocr/*`, `app/database.py`, `app/sqlite.py`, `app/excel.py`, `app/routes.py`, templates), wrote the test suite and the documentation, generated `sql/*.sql`, `samples/` and the scripts in `tools/`, and diagnosed the bugs written up in `notes/` |
+
+**Every AI-assisted change was reviewed by reading it and verifying it by running
+it** - `pytest -q` (224 tests), `tools/verify_samples.py` (the five sample files
+through the real HTTP stack and a real SQLite store), the schema/seed comparison
+for `sql/sqlite_schema.sql`, and a live server smoke test (§14). Nothing is in the
+repository that was not executed at least once. No AI tool has access to any
+credentials, and no document content was sent anywhere: the OCR runs locally
+against the local Tesseract binary.
+
+If any other assistant was used during the submission (for example ChatGPT, GitHub
+Copilot or Cursor for a specific file), add it to this table - the requirement is
+that the list is complete.
+
+## 13. Assumptions, limitations and known issues
+
+### Assumptions
+
+1. **Tesseract is installed on the host** (it is a native binary, §1). Only `eng`
+   is installed by the Windows package used here; any other language needs its
+   `*.traineddata` in `tessdata/` and must be listed in `OCR_LANGUAGES`
+   (`eng+deu`). If the binary is missing the app still starts and reports the
+   problem through `/api/health` and the upload page instead of crashing.
+2. **Local, single-user tool.** There is no authentication, no user accounts and no
+   CSRF token, and the `/database` page accepts server credentials. Run it on
+   127.0.0.1 (the default) or behind a reverse proxy that authenticates; do not
+   expose it to a network as-is.
+3. **Uploads are what they claim to be** - one of `.jpg`, `.jpeg`, `.png`, `.pdf`,
+   at most 16 MB (`MAX_UPLOAD_MB`) and at most 25 PDF pages (`MAX_PDF_PAGES`).
+   Content is verified against the extension (magic bytes), but there is no
+   antivirus scanning.
+4. **Timestamps are UTC** everywhere (upload time and `stored_at`); the UI and the
+   API label them as UTC. `uploaded_at` is a naive UTC value (`DATETIME(6)` in
+   MySQL, `YYYY-MM-DD HH:MM:SS.ffffff` text in SQLite).
+5. **A page whose embedded text layer holds at least `MIN_EMBEDDED_TEXT_CHARS`
+   (50) characters is trusted as-is** - no OCR runs on it, so a digital PDF with
+   broken embedded text is reproduced verbatim rather than re-recognised.
+6. **One process.** The result cache (§7, `RESULT_TTL_SECONDS`,
+   `RESULT_CACHE_SIZE`) lives in the memory of a single process; a multi-worker
+   deployment stores records in the database but serves `/result/<id>` only from
+   the worker that created it.
+7. The commands are run from the project root; PowerShell is used for the Windows
+   examples, with `bash` alternatives where a shell is involved.
+
+### Limitations and known issues
+
+| # | Limitation / issue | Detail, and what to do about it |
+|---|---|---|
+| 1 | **The MySQL path was never run against a live server** | The development machine has no MySQL server (and no Docker), so MySQL is covered by `tests/test_database.py` (a recording fake of the PyMySQL surface) and by checking that `sql/mysql_schema.sql` contains exactly the DDL `app/database.py` builds. The DDL is plain InnoDB/utf8mb4 using only `IF NOT EXISTS`. **Do one connect against your server as the final acceptance check** (`/database` -> *Connect & create schema*, or `POST /api/database/connect`). SQLite, by contrast, was executed for real end to end (schema comparison, seed data, uploads, search, records view, export, delete). |
+| 2 | **No schema migrations** | Tables are created with `CREATE TABLE IF NOT EXISTS`; an existing table is never altered. A future column would need an explicit `ALTER TABLE`, so pointing an older database at a newer build can leave columns missing. |
+| 3 | **SQLite `LIKE` is case-insensitive for ASCII only** | The records search is case-insensitive in ASCII for both stores; with the SQLite store, case-insensitive matching does **not** happen for accented or non-Latin text (MySQL's utf8mb4 collation is not ASCII limited), so the same query can behave differently on the two stores. |
+| 4 | **Search is `LIKE '%term%'`, not full text** | The term is matched against `filename`/`content` (plus the record id when it is numeric). It is bounded, escaped and always bound as a parameter, but every row's `content` is inspected - there is no full-text index and no relevance ranking. |
+| 5 | **Results expire** | `/result/<id>` and its `.txt` download only work while the result sits in the in-memory cache (30 minutes, 50 entries by default). The stored record survives, and `/database/records/<id>` is the permanent view. |
+| 6 | **Throughput** | Tesseract is CPU-bound and handles one page at a time, and the Flask development server is not a production server. Each page is bounded by `OCR_TIMEOUT_SECONDS` (120 s), so a very heavy page can still fail that one page. For traffic, run a real WSGI server (waitress) with one worker per core. |
+| 7 | **Encrypted PDFs are rejected** (`400`, "password protected") | Nothing is decrypted - remove the password first. A PDF whose pages are images costs one OCR run per page. |
+| 8 | **The `.xlsx` export is memory bound and page bound** | It mirrors what the table shows: at most the 200-row cap (`MAX_LIST_LIMIT`) per download, built entirely in memory. Cells are inline strings; spreadsheet styling is limited to number formats, a frozen header row and an autofilter. |
+| 9 | **The remembered MySQL password is stored in clear text** | `instance/mysql_connection.json` (git-ignored, `chmod 600` on POSIX - Windows ACLs are not tightened) holds whatever you ticked "remember these details" for. Treat it as a secret, or untick the box / use *Forget saved details*. |
+| 10 | **Duplicates are not detected automatically** | `content_sha256` is stored so duplicates can be found (`SELECT ... WHERE content_sha256 = SHA2(<text>, 256)`), but an upload is never skipped or merged on insert. |
+| 11 | **The documentation named the page table `ocr_extraction_pages`** | The real, derived name is `ocr_extractions_pages` (`<MYSQL_TABLE>` + `_pages`). The code was always right; the README, one note and two docstrings said otherwise and were corrected for this submission - both SQL scripts use the derived name. |
+| 12 | **The sample images depend on an OS font** | `tools/make_samples.py` renders them with Arial (Windows) or DejaVu (Linux), so file digests and the last digit of the confidence values differ between machines. The recognised text does not. |
+| 13 | **Without Tesseract the OCR tests are skipped, not failed** | `pytest -q` then reports the subset that needs no engine (validation, storage, units). `tools/verify_samples.py` exits `2` with the install hint instead of pretending to have checked the images. |
+| 14 | **The first-page preview is a PNG data URI** | Only page 1 of a PDF is rendered for the thumbnail (`PREVIEW_MAX_PX`) and it is embedded directly in the HTML page, which makes the result page a little larger. |
+
+## 14. Submission package: SQL scripts, sample files and the ZIP
+
+### The database scripts (`sql/`)
+
+The application creates its schema by itself when you connect a store (§5). These
+two scripts are the same DDL as a file, plus seed data, for reviewers who want to
+pre-create the objects or inspect them in SQL. Both are **idempotent** - running
+them twice changes nothing.
+
+| Script | Target | Contents |
+|---|---|---|
+| `sql/mysql_schema.sql` | MySQL 8.0 | `CREATE DATABASE IF NOT EXISTS flask_ocr` (utf8mb4), both tables with the three indexes, the unique key and the cascading foreign key, **2 seed extractions + 4 page rows** (ids 9001+, so they cannot collide with real uploads), a `SHA2()` step that fills `content_sha256` the way the app does, verification queries and the grants a user needs |
+| `sql/sqlite_schema.sql` | SQLite (the default store) | the same two tables and three indexes, `PRAGMA foreign_keys = ON`, the same seed rows with the real SHA-256 values (stock SQLite has no `SHA2()`) |
+
+```powershell
+# MySQL (creates the schema, the tables and the seed rows)
+mysql -u root -p < sql/mysql_schema.sql
+
+# SQLite - either the CLI ...
+sqlite3 instance/ocr_records.sqlite3 < sql/sqlite_schema.sql
+# ... or Python, which is what this project uses (sqlite3 is part of CPython)
+env\Scripts\python.exe -c "import sqlite3; sqlite3.connect('instance/ocr_records.sqlite3').executescript(open('sql/sqlite_schema.sql', encoding='utf-8').read())"
+```
+
+The seed rows are exactly what the application extracted from two of the sample
+files, so the records view, the search and the `.xlsx` export can be tried without
+uploading anything first. Remove them again with
+`DELETE FROM ocr_extractions WHERE id IN (9001, 9002);` (the page rows cascade).
+
+### The sample files (`samples/`)
+
+| File | Size | Kind | Pages | Extracted as |
+|---|---|---|---|---|
+| `images/scan_invoice.png` | 22.8 KB | image | 1 | OCR - 53 chars, 95.11 % |
+| `images/scan_receipt.jpg` | 27.1 KB | image | 1 | OCR (JPEG path) - 50 chars, 96.00 % |
+| `images/blank_page.png` | 2.3 KB | image | 1 | OCR - 0 chars, the "no text found" case |
+| `pdf/scanned_invoice_3_pages.pdf` | 75.1 KB | pdf | 3 | OCR on **every** page - 178 chars, 95.47 % |
+| `pdf/digital_report_text_layer.pdf` | 0.7 KB | pdf | 1 | **embedded** text layer, Tesseract never called - 93 chars |
+
+`samples/README.md` documents each file in detail, the expected text, how the files
+are regenerated and how they are verified. They are synthetic (all text is
+fictitious), and they are produced by `tools/make_samples.py`, so the pixel bytes
+never have to be committed by hand.
+
+### Regenerating and verifying them
+
+```powershell
+env\Scripts\python.exe tools\make_samples.py       # (re)write samples/ and print a manifest
+env\Scripts\python.exe tools\verify_samples.py     # upload every sample and check the result
+env\Scripts\python.exe -m pytest -q                # 224 tests
+```
+
+`tools/verify_samples.py` builds the real application (pointed at a throw-away
+SQLite file), uploads each sample through the HTTP stack and asserts the kind, the
+page count, the extraction method per page, the expected text and that the upload
+was stored - verified both through `GET /api/database/records` and with plain
+`sqlite3` against the file. Its output on this machine:
+
+```
+file                                      HTTP kind   pages extract    chars   conf  record  verdict
+images/scan_invoice.png                    200 image      1 ocr           53   95.1       1  ok
+images/scan_receipt.jpg                    200 image      1 ocr           50   96.0       2  ok
+images/blank_page.png                      200 image      1 ocr            0      -       3  ok
+pdf/scanned_invoice_3_pages.pdf            200 pdf        3 ocr          178   95.5       4  ok
+pdf/digital_report_text_layer.pdf          200 pdf        1 embedded      93      -       5  ok
+
+stored records        : 5 (API) / 5 (SQLite)
+stored pages          : 7 (SQLite), expected 7
+All 5 sample files passed every check.
+```
+
+### Building the ZIP
+
+```powershell
+env\Scripts\python.exe tools\package_submission.py
+```
+
+writes **`dist/flask_ocr_submission.zip`** - one top-level folder `flask_ocr/`
+containing the application source, the tests, `sql/`, `samples/`, `README.md` and
+the development notes. `env/`, `.git/`, `instance/` (runtime state, SQLite files,
+remembered credentials), `dist/` and every `__pycache__` stay out. The script
+re-opens the finished archive and fails if one of the required deliverables
+(README, `run.py`, `requirements.txt`, the app, the tests, both SQL scripts, the
+five sample files) is missing or the archive is corrupt.
+
+### What was verified before packaging
+
+| Check | Result |
+|---|---|
+| `pytest -q` (whole suite) | **224 passed** in ~6 s |
+| `tools/verify_samples.py` | **5/5** sample files, 5 records and 7 page rows in a real SQLite file |
+| `sql/sqlite_schema.sql` | applied **twice** (idempotent), then compared with the database the application creates: identical `sqlite_master` DDL and identical `PRAGMA table_info` columns; the seed digests re-computed with `hashlib` match; the app lists, searches (`q=ALPHA`), opens and exports the seeded records |
+| `sql/mysql_schema.sql` | contains **verbatim** the DDL `create_database_sql` / `create_table_sql` / `create_pages_table_sql` produce for the default names. Not executed: no MySQL server here (limitation 1) |
+| Live server (`run.py --port 5055`, SQLite store) | `GET /` 200 (drop zone), `GET /api/health` 200 (`available: true`, `5.4.0.20240606`, `eng`+`osd`), `POST /api/ocr` with `scan_invoice.png` -> 200, 53 chars, 95.11 %, *saved as record #1*, records view renders it, `GET /database/records/export.xlsx` 200 with a real workbook (5,761 bytes), an unsupported `.txt` upload -> **400** |
+| `python -c "import app"` | no import-time side effects: Tesseract is located lazily and a missing engine is reported, not raised (§1) |
+
+
+
+
+
+
 
 

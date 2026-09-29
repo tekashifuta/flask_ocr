@@ -20,6 +20,9 @@ instance/
 .coverage
 htmlcov/
 
+# Submission archive built by tools/package_submission.py
+dist/
+
 # Editors / OS
 .vscode/
 .idea/

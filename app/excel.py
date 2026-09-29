@@ -541,7 +541,8 @@ def records_workbook(
       every statistic the record page shows, and the **full extracted text** (the
       records view itself only lists a snippet).
     * **Pages** - one row per page of those records, i.e. the
-      ``ocr_extraction_pages`` table.  Added only when page rows were supplied.
+      ``ocr_extractions_pages`` table (the parent table plus ``_pages``).
+      Added only when page rows were supplied.
     * **Export** - the filters, the schema and the row count, so a spreadsheet that
       travels by e-mail explains itself.
 

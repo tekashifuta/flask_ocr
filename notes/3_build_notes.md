@@ -13,7 +13,7 @@ A self-contained PyMySQL layer (pure-Python driver, no compiler needed):
 * **`DatabaseManager`** – holds the *active* connection plus the optional credential memory (`instance/mysql_connection.json`, chmod 600 on POSIX, never served). A failed reconnect **keeps the working connection**.
 
 ### Schema (created automatically when you connect)
-| `ocr_extractions` (1 row per upload) | `ocr_extraction_pages` (1 row per page) |
+| `ocr_extractions` (1 row per upload) | `ocr_extractions_pages` (1 row per page) |
 |---|---|
 | `id`, **`filename`**, **`uploaded_at`** UTC `DATETIME(6)`, **`content`** `LONGTEXT`, `kind`, `page_count`, `char_count`, `word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`, `engine_version`, `content_sha256`, `stored_at` + indexes | `extraction_id` → `FOREIGN KEY … ON DELETE CASCADE`, `page_number`, `method` (`ocr`/`embedded`), `content`, counts, confidence, duration |
 

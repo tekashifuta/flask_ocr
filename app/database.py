@@ -10,8 +10,9 @@ restart and can be queried with plain SQL:
     date/time** (UTC) and the **extracted content**, plus the statistics the
     result page already shows (pages, characters, words, confidence, engine).
 
-``ocr_extraction_pages``
-    One row per page, so a multi-page PDF can be queried page by page.  The
+``ocr_extractions_pages``
+    One row per page, so a multi-page PDF can be queried page by page (the name is
+    the parent table plus ``_pages``, see :data:`PAGES_TABLE_SUFFIX`).  The
     foreign key cascades, deleting an extraction removes its pages.
 
 Nothing is created or written until an operator connects a server from the
