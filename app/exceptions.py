@@ -65,6 +65,14 @@ class PageLimitExceededError(UploadValidationError):
     code = "too_many_pages"
 
 
+class BatchLimitExceededError(UploadValidationError):
+    """More files were submitted than one batch may contain."""
+
+    status_code = 400
+    code = "too_many_files"
+
+
+
 class OcrEngineUnavailableError(OcrAppError):
     """Tesseract is missing or could not be started."""
 

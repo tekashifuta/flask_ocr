@@ -488,7 +488,13 @@ def workbook_bytes(
 RECORD_COLUMNS: tuple[Column, ...] = (
     Column("#", key="id", width=8, kind=INTEGER),
     Column("File name", key="filename", width=38),
+    Column("Supplier", key="supplier", width=28),
+    Column("Invoice number", key="invoice_number", width=18),
+    Column("Date", key="document_date", width=13),
+    Column("Total amount", key="total_amount", width=14, kind=DECIMAL),
+    Column("Currency", key="currency", width=10),
     Column("Uploaded (UTC)", key="uploaded_at", width=21),
+
     Column("Type", key="kind", width=9),
     Column("Pages", key="page_count", width=8, kind=INTEGER),
     Column("Characters", key="char_count", width=11, kind=INTEGER),

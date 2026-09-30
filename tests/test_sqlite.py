@@ -544,22 +544,29 @@ def test_database_page_offers_the_sqlite_form(client):
     assert "Connect SQLite file" in body
 
 
-def test_the_upload_page_names_the_configured_store(make_client, tmp_path):
+def test_the_upload_page_names_the_configured_store(make_client, tmp_path, text_pdf_factory):
     path = str(tmp_path / "ocr.sqlite3")
     client = make_client(DATABASE_BACKEND=BACKEND_SQLITE, SQLITE_PATH=path)
 
     body = client.get("/").get_data(as_text=True)
     assert "Database storage (SQLite)" in body
-    assert "Save the extracted data to SQLite" not in body, "only offered while connected"
+    assert "Save the reviewed data to SQLite" not in body, "saving is decided on the review page"
 
     client.post("/database/connect", data={"backend": BACKEND_SQLITE, "path": path})
     connected = client.get("/").get_data(as_text=True)
-    assert "Save the extracted data to SQLite" in connected
-    assert path in connected
+    assert path in connected, "the configured file is named before anything is stored"
+
+    review = client.post(
+        "/upload",
+        data={"file": (io.BytesIO(text_pdf_factory("Total: 1.00 EUR")), "doc.pdf")},
+        content_type="multipart/form-data",
+    ).get_data(as_text=True)
+    assert "Save the reviewed data to SQLite" in review, "only offered while connected"
+    assert path in review
 
 
 def test_connect_sqlite_then_store_search_export_and_delete(
-    make_client, tmp_path, text_pdf_factory
+    make_client, tmp_path, text_pdf_factory, review_save
 ):
     path = str(tmp_path / "ocr.sqlite3")
     client = make_client(DATABASE_BACKEND=BACKEND_SQLITE, SQLITE_PATH=path)
@@ -574,22 +581,27 @@ def test_connect_sqlite_then_store_search_export_and_delete(
         "/upload",
         data={
             "file": (
-                io.BytesIO(text_pdf_factory("ACME invoice 2026 total 42")),
+                io.BytesIO(text_pdf_factory("ACME invoice 2026\nTotal: 42.00 EUR")),
                 "invoice.pdf",
             )
         },
         content_type="multipart/form-data",
     )
     assert upload.status_code == 200
-    assert "Saved to SQLite as" in upload.get_data(as_text=True)
+
+    saved = review_save(client, upload, supplier_0="ACME GmbH")
+    assert saved.status_code == 200
+    assert "Stored in SQLite as" in saved.get_data(as_text=True)
 
     records = client.get("/database/records?q=invoice").get_data(as_text=True)
     assert "invoice.pdf" in records
     assert "1 match" in records
+    assert "ACME GmbH" in records, "the records table shows the reviewed fields"
 
     detail = client.get("/database/records/1").get_data(as_text=True)
     assert "Stored in SQLite" in detail
-    assert "ACME invoice 2026 total 42" in detail
+    assert "ACME invoice 2026" in detail
+    assert "ACME GmbH" in detail
 
     export = client.get("/database/records/export.xlsx")
     assert export.status_code == 200
@@ -599,6 +611,7 @@ def test_connect_sqlite_then_store_search_export_and_delete(
     deleted = client.post("/database/records/1/delete")
     assert deleted.status_code == 303
     assert "Nothing stored yet" in client.get("/database/records").get_data(as_text=True)
+
 
 
 def test_api_connect_sqlite_creates_the_file_and_reports_it(make_client, tmp_path):
@@ -717,14 +730,16 @@ def test_records_view_without_a_connection_asks_for_the_sqlite_store(make_client
     assert "Nothing is connected yet, so no extraction is stored" in body
     assert '<a href="/database">connect to a SQLite database</a>' in body
     assert '<a href="/database">SQLite storage</a>' in body, "the way to connect is linked"
-    assert "Connect to a SQLite database above to see (and store) extractions." not in body
+    assert "Nothing is connected yet, so extractions are not being stored" in body, (
+        "the empty table points at the SQLite panel - no form sits above the table"
+    )
 
 
 # ---------------------------------------------------------------------------
 # the shared fixtures (tests/conftest.py): one real file per test, no server
 # ---------------------------------------------------------------------------
 def test_sqlite_client_fixture_uploads_into_the_tmp_path_file(
-    sqlite_client, sqlite_path, text_pdf_factory
+    sqlite_client, sqlite_path, text_pdf_factory, review_save
 ):
     """The fixture's file is a real database: read the row back with plain sqlite3."""
     assert sqlite_path.is_file(), "connecting created the database file"
@@ -739,9 +754,11 @@ def test_sqlite_client_fixture_uploads_into_the_tmp_path_file(
         },
         content_type="multipart/form-data",
     )
-
     assert upload.status_code == 200
-    assert "Saved to SQLite as" in upload.get_data(as_text=True)
+
+    saved = review_save(sqlite_client, upload)
+    assert saved.status_code == 200
+    assert "Stored in SQLite as" in saved.get_data(as_text=True)
     stored_view = sqlite_client.get("/database/records").get_data(as_text=True)
     assert "fixture.pdf" in stored_view
 
@@ -753,6 +770,7 @@ def test_sqlite_client_fixture_uploads_into_the_tmp_path_file(
     assert len(stored) == 1
     assert stored[0][0] == "fixture.pdf"
     assert "Fixture invoice 2026 total 42" in stored[0][1]
+
 
 
 def test_sqlite_store_fixture_is_the_live_store_in_the_tmp_path_file(
@@ -772,20 +790,24 @@ def test_sqlite_store_fixture_is_the_live_store_in_the_tmp_path_file(
 
 
 # ---------------------------------------------------------------------------
-# the ``save_to_db`` field pair the upload form sends (hidden 0 + ticked box 1)
+# the ``save_to_db`` field pair the review form sends (hidden 0 + ticked box 1)
 # ---------------------------------------------------------------------------
-def test_the_upload_form_offers_a_ticked_save_checkbox_and_its_hidden_twin(
-    sqlite_client,
+def test_the_review_form_offers_a_ticked_save_checkbox_and_its_hidden_twin(
+    sqlite_client, text_pdf_factory
 ):
-    """The two fields the tests below post are the two fields the form renders."""
-    body = sqlite_client.get("/").get_data(as_text=True)
+    """The two fields the tests below post are the two fields the page renders."""
+    review = sqlite_client.post(
+        "/upload",
+        data={"file": (io.BytesIO(text_pdf_factory("Any invoice 2026")), "doc.pdf")},
+        content_type="multipart/form-data",
+    ).get_data(as_text=True)
 
-    assert '<input type="hidden" name="save_to_db" value="0">' in body
-    assert '<input type="checkbox" name="save_to_db" value="1" checked>' in body
+    assert '<input type="hidden" name="save_to_db" value="0">' in review
+    assert '<input type="checkbox" name="save_to_db" value="1" checked' in review
 
 
-def test_upload_from_the_form_stores_the_extraction(
-    sqlite_client, sqlite_path, text_pdf_factory
+def test_reviewing_from_the_form_stores_the_extraction(
+    sqlite_client, sqlite_path, text_pdf_factory, review_save
 ):
     """The browser posts the hidden ``0`` **and** the ticked checkbox ``1``.
 
@@ -802,28 +824,33 @@ def test_upload_from_the_form_stores_the_extraction(
     )
 
     assert upload.status_code == 200
-    assert "Saved to SQLite as" in upload.get_data(as_text=True), "a ticked box saves"
+    saved = review_save(sqlite_client, upload, save_to_db=["0", "1"])
+    assert saved.status_code == 200
+    assert "Stored in SQLite as" in saved.get_data(as_text=True), "a ticked box saves"
     with sqlite3.connect(str(sqlite_path)) as connection:
         rows = connection.execute("SELECT `filename` FROM `ocr_extractions`").fetchall()
     assert rows == [("form.pdf",)]
 
 
-def test_unticking_the_save_checkbox_keeps_the_upload_out_of_the_store(
-    sqlite_client, sqlite_store, text_pdf_factory
+def test_unticking_the_save_checkbox_keeps_the_reviewed_document_out_of_the_store(
+    sqlite_client, sqlite_store, text_pdf_factory, review_save
 ):
     """An unticked box submits only the hidden ``0`` - and that means "do not save"."""
     upload = sqlite_client.post(
         "/upload",
         data={
-            "save_to_db": "0",
             "file": (io.BytesIO(text_pdf_factory("Opted out 2026")), "opted-out.pdf"),
         },
         content_type="multipart/form-data",
     )
 
-    assert upload.status_code == 200
-    assert "Saved to" not in upload.get_data(as_text=True)
+    saved = review_save(sqlite_client, upload, save_to_db="0")
+
+    assert saved.status_code == 200
+    assert "Stored in SQLite" not in saved.get_data(as_text=True)
+    assert "storing was switched off" in saved.get_data(as_text=True)
     assert sqlite_store.record_count() == 0, "the text is extracted, but not stored"
+
 
 
 # ---------------------------------------------------------------------------

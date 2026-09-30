@@ -26,7 +26,7 @@ import hashlib
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -50,9 +50,38 @@ FONT_SIZE = 48
 LINE_HEIGHT = 62
 MARGIN = 40
 
+
+
 #: The text that goes into every sample (single source of truth for the checks).
 INVOICE_LINES = ("ACME invoice 2026", "Invoice no: 10042", "Total: 128.50 EUR")
 RECEIPT_LINES = ("Corner Coffee", "Latte 3.50 EUR", "Thanks for your visit")
+#: An invoice that carries every structured field *with a label*: the sample for
+#: the review page (supplier, invoice number, date, total, currency).
+DETAILED_INVOICE_LINES = (
+    "NORTHWIND TRADING GMBH",
+    "Supplier: Northwind Trading GmbH",
+    "Invoice no: INV-2026-0042",
+    "Date: 15.03.2026",
+    "Subtotal: 118.00 EUR",
+    "VAT 19%: 22.42 EUR",
+    "Total: 140.42 EUR",
+)
+#: What the parser must read out of ``DETAILED_INVOICE_LINES`` - the values the
+#: review page shows and the database stores.
+DETAILED_INVOICE_FIELDS = {
+    "supplier": "Northwind Trading GmbH",
+    "invoice_number": "INV-2026-0042",
+    "document_date": "2026-03-15",
+    "total_amount": "140.42",
+    "currency": "EUR",
+}
+#: Tall enough for those seven lines: the default page would clip the "Total" line,
+#: and a scanner does not invent what it never saw.
+DETAILED_INVOICE_SIZE = (
+    PAGE_SIZE[0],
+    MARGIN * 2 + len(DETAILED_INVOICE_LINES) * LINE_HEIGHT,
+)
+
 SCANNED_PDF_PAGES = (
     ("ACME purchase order ALPHA", "Line one of the scanned document"),
     ("ACME purchase order BRAVO", "Line two of the scanned document"),
@@ -64,6 +93,7 @@ DIGITAL_PDF_LINES = (
     "Growth 12.4 %",
     "Prepared by the finance team.",
 )
+
 
 
 def _font(size: int = FONT_SIZE):
@@ -180,11 +210,15 @@ class Sample:
     pages: int = 1
     #: ``ocr`` or ``embedded`` - how each page must be extracted.
     method: str = "ocr"
+    #: Structured fields (``app/fields.py``) the document must yield, when the
+    #: sample is meant to exercise the review page.
+    expected_fields: Mapping[str, str | None] | None = None
 
     @property
     def filename(self) -> str:
         """Base name of the file."""
         return self.relative_path.rsplit("/", 1)[-1]
+
 
 
 SAMPLES: tuple[Sample, ...] = (
@@ -195,7 +229,30 @@ SAMPLES: tuple[Sample, ...] = (
         expected=("ACME", "10042", "128.50"),
         build=lambda: render_text_image(INVOICE_LINES),
         method="ocr",
+        # Only the invoice number and the total carry a label; the supplier is the
+        # header line, and there is no date on that page at all.
+        expected_fields={
+            "supplier": "ACME",
+            "invoice_number": "10042",
+            "document_date": None,
+            "total_amount": "128.50",
+            "currency": "EUR",
+        },
     ),
+    Sample(
+        relative_path="images/scan_invoice_fields.png",
+        kind="image",
+        description=(
+            "Invoice with every structured field labelled: supplier, invoice number, "
+            "date, subtotal, VAT and total (the review page case)."
+        ),
+        expected=("NORTHWIND", "INV-2026-0042", "140.42", "22.42"),
+        build=lambda: render_text_image(DETAILED_INVOICE_LINES, size=DETAILED_INVOICE_SIZE),
+        method="ocr",
+        expected_fields=dict(DETAILED_INVOICE_FIELDS),
+
+    ),
+
     Sample(
         relative_path="images/scan_receipt.jpg",
         kind="image",

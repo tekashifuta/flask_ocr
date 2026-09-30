@@ -7,14 +7,17 @@ download) plus a JSON API for automation.
 
 | | |
 |---|---|
-| Web UI | `POST /upload` -> per-page text, confidence, `.txt` download |
+| Web UI | `POST /upload` (one file or a batch) -> **review page** -> `POST /review/save` |
+| Structured fields | Supplier, invoice number, date, total amount and currency, extracted from the text, **corrected by you**, then stored in their own columns |
+| Batch upload | Up to `MAX_BATCH_FILES` (10 by default) files per upload, reviewed and stored together |
 | JSON API | `POST /api/ocr` -> structured result, `GET /api/health` -> engine status |
 | OCR engine | Tesseract 5.x through `pytesseract` |
 | PDF handling | PDFium (`pypdfium2`) - renders pages *and* reads text layers, **no Poppler needed** |
-| Storage | Extracted text optionally in **MySQL** or a **SQLite** file - connect from `/database`, schema and tables are created for you |
+| Storage | Extracted text **and the reviewed fields** in **MySQL** or a **SQLite** file - connect from `/database`, schema and tables are created for you |
 | Excel export | The stored records (search included) download as `.xlsx` - no extra dependency, nothing written to disk |
 | Verified on | Python 3.14.6 / Windows, Tesseract 5.4.0, Flask 3.1.3, Pillow 12.3.0, pypdfium2 5.13.0, PyMySQL 1.2.3 |
 | Privacy | Documents are processed **in memory** and never written to disk |
+
 
 **Where to find what:** `sql/` holds the database scripts (schema + seed data),
 `samples/` the files the application was tested with, `tools/` the scripts that
@@ -77,14 +80,14 @@ text goes into**, because that is what fills the records view:
 ```
 app: Tesseract OCR ready: C:\Program Files\Tesseract-OCR\tesseract.exe (languages=eng, psm=3, oem=3)
 app: sqlite ready: d:\Python_Projects\flask_ocr\instance\ocr_records.sqlite3 (schema already present, tables already present)
-__main__: Storing extractions in SQLite (d:\Python_Projects\flask_ocr\instance\ocr_records.sqlite3) - browse them at /database/records
+__main__: Storing reviewed extractions in SQLite (d:\Python_Projects\flask_ocr\instance\ocr_records.sqlite3) - browse them at /database/records
 ```
 
 `run.py` **connects a store before it takes traffic** (the local SQLite file unless
-MySQL is configured and reachable - see `DATABASE_BACKEND`), so what you extract is
-really saved and the records view has something to show. Set `DATABASE_AUTO_CONNECT=0`
-to connect by hand from `/database` instead; the log line then warns that uploads are
-only kept in memory.
+MySQL is configured and reachable - see `DATABASE_BACKEND`), so the data you review
+and save is really stored and the records view has something to show. Set
+`DATABASE_AUTO_CONNECT=0` to connect by hand from `/database` instead; the log line
+then warns that reviewed data is only kept in the memory of the process.
 
 If Tesseract cannot be found you get an ERROR log line, a clear message on the
 upload page, and `GET /api/health` answers `503` so a deployment check can fail
@@ -104,6 +107,12 @@ upload ──> validate ──> kind? ─┬─ image ─> load (verify, EXIF ro
                                                yes -> use it   (fast, exact, no OCR)
                                                no  -> render at OCR_DPI -> preprocess -> OCR
                                            join pages with "----- Page n of m -----"
+                               │
+                               └─────────> read the structured fields out of the text
+                                           (app/fields.py: supplier, invoice number,
+                                            date, total amount, currency)
+                                           ──> REVIEW page (you correct them)
+                                           ──> POST /review/save -> the store
 ```
 
 * **Images** are always OCR'd. A two-pass `verify()`/reopen check rejects
@@ -115,14 +124,69 @@ upload ──> validate ──> kind? ─┬─ image ─> load (verify, EXIF ro
 * **Digital PDFs** are read straight from their text layer, so a 50-page report
   costs milliseconds instead of minutes. Mixed documents work too: the decision
   is made per page.
-* **Safety valves**: `MAX_PDF_PAGES`, `MAX_UPLOAD_MB`, a render pixel budget
-  (`OCR_MAX_RENDER_PIXELS`) and an image pixel budget (`MAX_IMAGE_PIXELS`) keep a
-  hostile or accidental upload from exhausting memory. Each OCR run is bounded by
-  `OCR_TIMEOUT_SECONDS`.
+* **Structured fields** are read from the finished text with small, readable rules
+  (§4.1), and every value carries the confidence of the rule that found it. They
+  are **proposals**: the review page shows them as editable inputs next to the
+  extracted text, and only what is left in those fields is stored (§4.2).
+* **Safety valves**: `MAX_PDF_PAGES`, `MAX_UPLOAD_MB`, `MAX_BATCH_FILES`, a render
+  pixel budget (`OCR_MAX_RENDER_PIXELS`) and an image pixel budget
+  (`MAX_IMAGE_PIXELS`) keep a hostile or accidental upload from exhausting memory.
+  Each OCR run is bounded by `OCR_TIMEOUT_SECONDS`.
 
 Validation happens in two stages: the extension is checked first, then the real
 file signature (`%PDF-` magic bytes, Pillow format sniffing). A renamed file is
-therefore rejected with `400` instead of being fed to the OCR engine.
+therefore rejected with `400` instead of being fed to the OCR engine. A batch is
+validated the same way *before* anything is OCR'd, so one bad file cannot cost a
+dozen Tesseract runs.
+
+### 4.1 Where the fields come from (`app/fields.py`)
+
+Five values are proposed for every document, and each one records **how** it was
+found - which is what the badge next to the input on the review page says:
+
+| Field | Filled from | Confidence |
+|---|---|---|
+| `supplier` | a labelled line (`Supplier:`, `Vendor:`, `Sold by:`, `From:` …) | 90 |
+| | else the first header line that is not another field or a bare number (`ACME invoice 2026` -> `ACME`) - only for a document that looks like an invoice or receipt | 45 |
+| `invoice_number` | a labelled line (`Invoice no:`, `Inv #`, `Reference:`, `Belegnummer:` …), separators tightened (`INV - 1 - 2` -> `INV-1-2`) | 90 |
+| | else a token that looks like one (`INV-2026-0042`) | 45 |
+| `document_date` | a labelled line (`Date:`, `Invoice date:`, `Datum:` …) in any usual notation: `15.03.2026`, `3/15/2026`, `15 March 2026` | 90 |
+| | else the first date on the page, stored as `YYYY-MM-DD` | 60 |
+| `total_amount` | the line labelled `Total`, `Amount due`, `Balance due`, `Gesamtbetrag` … (never `Subtotal`, `VAT` or `Net`), as `1234.56` | 90 |
+| | else the largest amount that carries a currency marker or decimals | 45 |
+| `currency` | written next to that amount (`128.50 EUR`, `€ 128,50`) | 90 |
+| | else the currency the document mentions most often | 45 |
+
+What it deliberately does **not** do: invent a supplier or an invoice number for a
+document that is not an invoice (a report only yields the amounts it contains), and
+read a bare four digit number as an amount (`Q1 2026` is a year, not a total). The
+rules are covered field by field in `tests/test_fields.py`, and the samples are
+checked against their expected values by `tools/verify_samples.py` (§14).
+
+### 4.2 Review before saving
+
+* **Nothing is written to the store by `/upload`.** The review page shows one card
+  per document - the first page preview, the extracted text (collapsed) and the
+  fields as inputs - and *it* is the form that stores: the values left in those
+  fields are exactly what the store receives.
+* A value that cannot be read (a date like `whenever`, an amount like `not a
+  number`) comes back **on the same page**, next to its field, and nothing is
+  stored - the message quotes what was sent, so a typo cannot silently become
+  something else, and everything else you typed is still there.
+* Amounts and dates are normalised on the way in: `1.234,56` and `1,234.56` both
+  become `1234.56`, `15.03.2026` becomes `2026-03-15`, `eur` becomes `EUR`.
+* Unticking **Store this document** leaves that document out and stores the rest -
+  a batch of invoices must not be lost because one page was unreadable.
+* The result page (`GET /result/<id>`) still shows the per-page text, the
+  confidence and the fields as they were read, and links back to the review step
+  while the result is still in the cache (`RESULT_TTL_SECONDS`).
+* The **JSON API has no reviewer**, so it keeps the one-shot behaviour: `POST
+  /api/ocr` extracts *and* stores (opt out with `save_to_db=0`) and answers with the
+  fields; `POST /api/ocr/batch` does the same for several files, and `POST
+  /api/review/save` stores corrected values afterwards (§6).
+
+
+
 
 ## 5. Storing extractions in MySQL or SQLite
 
@@ -195,22 +259,22 @@ curl -X POST http://127.0.0.1:5000/api/database/connect \
      -d '{"backend":"sqlite","path":"instance/test.sqlite3"}'
 ```
 
-Once connected, every extraction is stored and the result page says so, e.g.
-*Saved to MySQL as record #12* (or *Saved to SQLite as ...*). The upload form
-carries a **Save the extracted data to ...** checkbox (ticked by default); unticking
-it keeps that upload out of the store (the text is still extracted and shown).
-`POST /api/ocr` stores as well - see `DATABASE_AUTO_SAVE` and the `save_to_db`
-field in §7.
+Once connected, the values you **reviewed** are stored and the review page says so,
+e.g. *Stored in MySQL as record #12* (or *Stored in SQLite as ...*) with a link to
+the record. The review form carries a **Save the reviewed data to ...** checkbox
+(ticked by default); unticking it keeps that submit out of the store - the text and
+the fields stay on the page. `POST /api/ocr` stores as well (it has no reviewer) -
+see `DATABASE_AUTO_SAVE` and the `save_to_db` field in §7.
 
 The form posts `save_to_db` **twice**: a hidden `0` (so an unticked box still sends
 something) and then the checkbox itself (`1` when ticked). The route reads them all
 (`request.form.getlist`) and *any* truthy value means "save" - reading only the first
 value would always find the hidden `0` and store nothing. A request that sends no
-field at all (the JSON API) keeps the `DATABASE_AUTO_SAVE` default.
+field at all keeps the `DATABASE_AUTO_SAVE` default.
 
 ### What is stored
 
-`ocr_extractions` - one row per upload:
+`ocr_extractions` - one row per reviewed document:
 
 | Column | Meaning |
 |---|---|
@@ -218,24 +282,40 @@ field at all (the JSON API) keeps the `DATABASE_AUTO_SAVE` default.
 | `filename` | Sanitised original file name |
 | `uploaded_at` | Upload date and time, **UTC**, microseconds (`DATETIME(6)`) |
 | `content` | The extracted text (`LONGTEXT`, multi-page results keep page markers) |
+| `supplier` | `VARCHAR(255)` - the reviewed supplier (`NULL` when there is none) |
+| `invoice_number` | `VARCHAR(64)` - the reviewed invoice/document number |
+| `document_date` | `DATE` - the document date, normalised to `YYYY-MM-DD` |
+| `total_amount` | `DECIMAL(12,2)` - the gross total, normalised to two decimals |
+| `currency` | `CHAR(3)` - the ISO code next to that total |
 | `kind`, `page_count`, `char_count`, `word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`, `engine_version` | The statistics the result page shows |
 | `content_sha256` | SHA-256 of `content` - handy for de-duplicating |
 | `stored_at` | When the row was written (`TIMESTAMP`) |
+
+The five field columns are the ones `app/fields.py` proposes and the review page
+lets you correct; they are what the records table's *Supplier / no. / date / total*
+cell, the record page and the `.xlsx` export show. A store created by an **earlier
+version** of this project has the table without them - connecting (or *Create
+schema*) adds the missing columns in place (`ALTER TABLE ... ADD COLUMN`), leaving
+every stored row untouched; older rows simply keep `NULL` fields. MySQL has no
+`ADD COLUMN IF NOT EXISTS`, so the app probes `information_schema.COLUMNS` and
+SQLite probes `PRAGMA table_info` first (§14 shows the SQL it runs).
 
 `ocr_extractions_pages` - one row per page (`extraction_id`, `page_number`,
 `method` = `ocr`/`embedded`, `content`, counts, confidence, duration) with
 `FOREIGN KEY ... ON DELETE CASCADE`, so deleting an extraction removes its pages.
 
-The `/database` page lists the stored records (every one of them by default; id, file
-name, upload time, pages,
-characters, confidence, a text snippet) with links to re-open the text, download it
-as `.txt` or delete the row. Deleting returns to the list you came from, with the
-search still applied.
+Every stored row is browsed in the **records view** (`/database/records`), not on
+`/database`: that page stays with the connection - form, live status and the stored row
+count - and links to the table. The records view lists every record by default (id,
+file name, supplier/no./date/total, upload time, pages, characters, confidence, a text
+snippet) with links to re-open the text, download it as `.txt` or delete the row.
+Deleting returns to the list, with the search still applied.
+
 
 ### Records view - browsing and searching what is stored
 
-`/database/records` is the **records view**: the same table without the connection
-form, plus a search box. The search runs **in the database** (never in Python), so
+`/database/records` is the **records view** - the only page that lists the store, with
+a search box. The search runs **in the database** (never in Python), so
 it works on any number of stored rows:
 
 * the term is matched **case-insensitively** against the file name and the stored
@@ -274,9 +354,8 @@ the rest - a 400 page result shows `1 2 3 4 5 … 400`, not 400 links.
 * each page is **one** `LIMIT`/`OFFSET` query - `OFFSET` is only added from page 2
   on, and it is bound like every other parameter;
 * the filters live in the URL, which makes a search bookmarkable and shareable:
-  `/database/records?q=invoice&scope=filename&limit=50&page=3`. The `/database` page
-  uses the same table (its page buttons stay on `/database`) and accepts the same
-  `?q=`/`?scope=`/`?limit=`/`?page=` parameters.
+  `/database/records?q=invoice&scope=filename&limit=50&page=3`. It is the only page
+  that reads them - `/database` is the connection form and ignores `?q=`/`?limit=`.
 
 ### Excel export (.xlsx)
 
@@ -298,8 +377,8 @@ like `123.pdf` is never turned into a number.
   looking at (page by page).
 * `GET /database/records/<id>/export.xlsx` - one record with its pages
   (**Download .xlsx** on the record page).
-* Both are offered by `/database` and `/database/records`; without a connection the
-  URL answers the same clear `400` as the other database endpoints.
+* Both are offered by the records view (and by a record page); without a connection
+  the URL answers the same clear `400` as the other database endpoints.
 * The workbook is written with the **standard library only** (`zipfile` + `xml`): no
   pandas, no openpyxl, nothing to install - and it is generated **in memory**, so
   the privacy story of the rest of the application is unchanged.
@@ -370,29 +449,34 @@ are not being saved.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/` | Upload form |
-| `POST` | `/upload` | Multipart `file` field -> HTML result page |
-| `GET` | `/result/<id>` | Re-open a stored result (kept for `RESULT_TTL_SECONDS`) |
+| `GET` | `/` | Upload form (one file or a batch, `multiple`) |
+| `POST` | `/upload` | Multipart `file` field(s) -> **review page** (nothing is stored yet) |
+| `POST` | `/review/save` | Validate the reviewed fields and store the ticked documents (`result_id` + `<field>_<n>` inputs, `save_to_db`); `400` with the message per field when a value cannot be read |
+| `GET` | `/review/<id>` | Review one cached result again (e.g. from the result page) |
+| `GET` | `/result/<id>` | Re-open a stored result (kept for `RESULT_TTL_SECONDS`) - text, per-page confidence and the fields as read |
 | `GET` | `/result/<id>/download` | Extracted text as a UTF-8 `.txt` attachment |
-| `GET` | `/database` | Connection form (MySQL + SQLite), live status and the stored records table (`?q=`, `?scope=`, `?limit=`, `?page=`) |
-| `POST` | `/database/connect` | Connect the submitted store (`backend=mysql`/`sqlite`) - schema or file created when missing; MySQL credentials are remembered |
-| `POST` | `/database/schema` | Re-run `CREATE TABLE IF NOT EXISTS` on the live store |
+| `GET` | `/database` | Connection form (MySQL + SQLite), live status and the stored row count - the rows are listed in the records view, which the page links to |
+| `POST` | `/database/connect` | Connect the submitted store (`backend=mysql`/`sqlite`) - schema or file created when missing, missing field columns added; MySQL credentials are remembered |
+| `POST` | `/database/schema` | Re-run `CREATE TABLE IF NOT EXISTS` on the live store (and add missing field columns) |
 | `POST` | `/database/disconnect` | Close the connection (saved details are kept) |
 | `POST` | `/database/forget` | Delete `instance/mysql_connection.json` |
 | `GET` | `/database/records` | Records view: every stored extraction, searchable (`?q=`, `?scope=`=`all`/`filename`/`content`, `?limit=`=`all`/rows per page, `?page=`) |
-| `GET` | `/database/records/<id>` | One stored extraction with its per-page text |
+| `GET` | `/database/records/<id>` | One stored extraction with its per-page text and its stored fields |
 | `GET` | `/database/records/<id>/download` | Stored text as a `.txt` attachment |
 | `GET` | `/database/records/export.xlsx` | The rows shown in the records table as an Excel workbook (`?q=`, `?scope=`, `?limit=`, `?page=`) |
 | `GET` | `/database/records/<id>/export.xlsx` | One stored extraction (with its pages) as an Excel workbook |
 | `POST` | `/database/records/<id>/delete` | Delete a record (its page rows cascade) |
-| `POST` | `/api/ocr` | Same pipeline, JSON response |
+| `POST` | `/api/ocr` | Same pipeline, JSON response - extracts **and stores** (opt out with `save_to_db=0`); one file per call |
+| `POST` | `/api/ocr/batch` | The same for several files: `{ok, count, saved, results: [...]}`, one entry per document |
+| `POST` | `/api/review/save` | Store **corrected** fields for cached results (`documents` list or a single flat object) |
 | `GET` | `/api/health` | Engine path/version/languages, limits and the database state |
 | `GET` | `/api/database` | Connection status, both backends, driver version, stored row count |
 | `POST` | `/api/database/connect` | Connect with a JSON body (`backend`/`host`/... or `backend`/`path`); creates what is missing |
 | `POST` | `/api/database/disconnect` | Close the connection |
 | `GET` | `/api/database/records` | Newest first; `?q=` searches (file name, text or record id), `?scope=`, `?limit=` (`all`, else max 200) and `?page=`; no `?limit=` returns the whole store; answers with `total`/`pages` |
-| `GET` | `/api/database/records/<id>` | One record including its pages |
+| `GET` | `/api/database/records/<id>` | One record including its pages and its structured fields |
 | `DELETE` | `/api/database/records/<id>` | Delete one record |
+
 
 Error responses are HTML for browsers and JSON for `/api/*`:
 
@@ -420,16 +504,61 @@ curl -F "file=@invoice.pdf" http://127.0.0.1:5000/api/ocr
   "duration_ms": 1081,
   "engine": {"name": "tesseract", "version": "5.4.0.20240606", "languages": "eng"},
   "text": "----- Page 1 of 3 -----\n\nACME purchase order ALPHA section one\n\n...",
+  "fields": {"supplier": "ACME", "invoice_number": "10042", "document_date": null,
+             "total_amount": "128.50", "currency": "EUR"},
+  "field_confidence": {"supplier": 45.0, "invoice_number": 90.0, "document_date": null,
+                       "total_amount": 90.0, "currency": 90.0},
   "pages": [
     {"page_number": 1, "method": "ocr", "char_count": 37, "word_count": 6,
      "confidence": 95.33, "duration_ms": 246, "text": "ACME purchase order ALPHA section one"}
   ],
-  "download_url": "/result/8f0d1c.../download"
+  "download_url": "/result/8f0d1c.../download",
+  "review_url": "/review/8f0d1c...",
+  "database": {"connected": true, "saved": true, "record_id": 12, "error": null}
 }
 ```
 
 `method` is `ocr` for rendered pages and `embedded` for pages that already had a
 text layer (`confidence` is `null` for those, because nothing was recognised).
+`fields` are the values the parser read, `field_confidence` says how (the same
+`90`/`60`/`45` as §4.1), and `database.saved` is `true` because the API stores what
+it extracts - it has no reviewer in front of it.
+
+A batch, one entry per document:
+
+```bash
+curl -F "file=@scan_invoice.png" -F "file=@scan_receipt.jpg" \
+     http://127.0.0.1:5000/api/ocr/batch
+```
+
+```json
+{"ok": true, "count": 2, "saved": 2,
+ "results": [{"result_id": "8f0d1c...", "filename": "scan_invoice.png", "fields": {...}},
+             {"result_id": "b41c07...", "filename": "scan_receipt.jpg", "fields": {...}}]}
+```
+
+Correcting a value before it is stored - the machine equivalent of the review page:
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/review/save \
+     -H 'Content-Type: application/json' \
+     -d '{"documents": [{"result_id": "8f0d1c...",
+                         "fields": {"supplier": "Acme GmbH", "total_amount": "1.234,56"}}]}'
+```
+
+```json
+{"ok": true, "connected": true, "count": 1, "saved": 1,
+ "documents": [{"result_id": "8f0d1c...", "filename": "invoice.pdf",
+                "fields": {"supplier": "Acme GmbH", "invoice_number": "10042",
+                           "document_date": null, "total_amount": "1234.56", "currency": "EUR"},
+                "corrected": ["supplier", "total_amount"], "saved": true, "record_id": 12}]}
+```
+
+Only the fields present in the request are changed (the rest keeps what the parser
+read), values are normalised the same way the form normalises them, and a value
+that cannot be read answers `400` with `{"fields": {"<result_id>": {"<field>":
+"message"}}}` - storing nothing, so a correction can never be silently dropped.
+
 
 ## 7. Configuration
 
@@ -451,6 +580,7 @@ them in the shell before `python run.py`, or pass overrides to
 | `MAX_IMAGE_PIXELS` | `50000000` | Pixel budget for an uploaded image |
 | `MIN_EMBEDDED_TEXT_CHARS` | `50` | Text length above which a PDF text layer is trusted |
 | `MAX_PDF_PAGES` | `25` | Requests with longer PDFs are rejected |
+| `MAX_BATCH_FILES` | `10` | Files one upload (one `/upload` batch) may contain |
 | `MAX_UPLOAD_MB` | `16` | Upload limit (`MAX_CONTENT_LENGTH` = this * 1 MiB) |
 | `PREVIEW_MAX_PX` | `360` | Size of the inline first-page thumbnail |
 | `RESULT_TTL_SECONDS` | `1800` | How long a result stays available for re-opening/download |
@@ -513,6 +643,8 @@ flask_ocr/
 │  ├─ config.py               # env-driven Config and Tesseract discovery
 │  ├─ exceptions.py           # domain errors -> HTTP status codes
 │  ├─ error_handlers.py       # HTML for browsers, JSON for /api
+│  ├─ fields.py               # structured fields: rules, confidence, validation
+│  ├─ review.py               # the review model + the review form's parsing
 │  ├─ database.py             # PyMySQL layer: settings, schema creation, queries
 │  ├─ sqlite.py               # the same two tables in one file, standard library only
 │  ├─ excel.py                # dependency free .xlsx writer + the records workbook
@@ -523,8 +655,9 @@ flask_ocr/
 │  │  ├─ engine.py            # Tesseract wrapper + TSV -> text reconstruction
 │  │  ├─ images.py            # decode, EXIF rotate, grey/contrast/upscale, previews
 │  │  └─ documents.py         # kind detection, image path, hybrid PDF path
-│  ├─ templates/              # base / index / result / database / records (+ partials)
+│  ├─ templates/              # base / index / review / result / database / records
 │  └─ static/                 # style.css, app.js (no CDN - works offline)
+
 ├─ sql/                       # standalone schema + seed data (MySQL and SQLite)
 ├─ samples/                   # the files the app was tested with (+ samples/README.md)
 ├─ tools/
@@ -547,8 +680,20 @@ env\Scripts\python.exe -m pytest -q
 
 * `tests/test_validation.py` - extensions, magic bytes, empty/oversized files,
   page limit, 404/405/500 handling, JSON error contract. No Tesseract needed.
+* `tests/test_fields.py` - the structured field rules: each sample text (including
+  the ones the shipped files produce), the date and amount normalisers, the
+  per-field confidence, and the validation a reviewer's typo runs into. No
+  Tesseract, no database.
+* `tests/test_review.py` - the review model and form parsing without OCR, plus the
+  whole flow against a real SQLite file: `POST /upload` renders the review page and
+  stores **nothing**, `/review/save` stores the corrected values, a bad value comes
+  back with its message, a document can be dropped from a batch, the batch limit is
+  enforced, `/review/<id>` re-opens a cached result, and `POST /api/ocr/batch` /
+  `POST /api/review/save` behave the way the JSON contract in §6 says. Also the
+  migration: a table created before the field columns existed is upgraded in place.
 * `tests/test_ocr_image.py` - PNG upload -> text, result re-open, `.txt`
   download, JSON API, blank page.
+
 * `tests/test_ocr_pdf.py` - 3-page scanned PDF (per-page OCR), digital PDF
   (text layer, no OCR), first-page preview.
 * `tests/test_units.py` - TSV parsing/confidence, embedded-text threshold,
@@ -648,7 +793,8 @@ the file on disk - needs the `tmp_path` file.
 | Timestamps look shifted | They are stored in **UTC**; convert in SQL with `CONVERT_TZ(uploaded_at, '+00:00', @@session.time_zone)` |
 | The records view is empty / "Nothing stored yet" | Nothing has been written to the **connected** store yet. Check the badge in the header: with **Not connected** nothing was ever saved (uploads only live in the in-memory cache) - connect a store on `/database` (the SQLite file needs nothing installed) and upload again. `python run.py` connects the local SQLite file for you |
 | "Nothing is connected yet, so no extraction is stored" | The records view has no connection and no form of its own; the link goes to `/database`, where the MySQL form and the SQLite panel are |
-| Extractions are not being saved at all | `DATABASE_AUTO_SAVE=0`, the **Save the extracted data...** checkbox was unticked (unticked = this upload is not stored; a request that sends no `save_to_db` field at all does store), or no store is connected (`/api/database` reports the state) |
+| Extractions are not being saved at all | `DATABASE_AUTO_SAVE=0`, the review page's **Save the reviewed data...** checkbox was unticked (unticked = this submit is not stored; a request that sends no `save_to_db` field at all does store), or no store is connected (`/api/database` reports the state). Remember that `/upload` never stores on its own - the review page's **Save reviewed data** button does |
+| The review page says a document's result expired | The review card's text and fields are re-read from the in-memory cache when you submit (`result_id`), and `RESULT_TTL_SECONDS` had passed. Upload the document again - the text itself was never lost, it simply cannot be stored from that page any more |
 | The export only holds some of the records | It mirrors the table: by default every stored record (up to the 200-row page cap), newest first. Page by page beyond that, or narrow the search |
 
 ## 11. Design notes
@@ -724,7 +870,7 @@ Everything below was verified together on **Python 3.14.6 / Windows 11
 | **Database** (default store) | **SQLite** | 3.50.4, via the standard library `sqlite3` of Python 3.14.6 | one file, no server, no credentials, nothing to install |
 | Excel export | *standard library only* | `zipfile` + `xml` | no pandas, no openpyxl (see §5) |
 | Front end | *none* | hand written CSS + vanilla JavaScript | no CDN, no build step, works offline |
-| Tests | pytest | 9.1.1 | 224 tests |
+| Tests | pytest | 9.1.1 | 301 tests |
 | Packaging | *standard library only* | `zipfile` via `tools/package_submission.py` | builds the submission archive |
 | Development machine | Windows 11 (10.0.26100), VS Code | | `winget` used for Tesseract, `py -3.14 -m venv` for the environment |
 
@@ -741,7 +887,7 @@ following was used while building this project:
 | **Cline** (AI coding agent in VS Code) | Drafted and refactored implementation code (`app/ocr/*`, `app/database.py`, `app/sqlite.py`, `app/excel.py`, `app/routes.py`, templates), wrote the test suite and the documentation, generated `sql/*.sql`, `samples/` and the scripts in `tools/`, and diagnosed the bugs written up in `notes/` |
 
 **Every AI-assisted change was reviewed by reading it and verifying it by running
-it** - `pytest -q` (224 tests), `tools/verify_samples.py` (the five sample files
+it** - `pytest -q` (301 tests), `tools/verify_samples.py` (the six sample files
 through the real HTTP stack and a real SQLite store), the schema/seed comparison
 for `sql/sqlite_schema.sql`, and a live server smoke test (§14). Nothing is in the
 repository that was not executed at least once. No AI tool has access to any
@@ -779,15 +925,24 @@ that the list is complete.
    `RESULT_CACHE_SIZE`) lives in the memory of a single process; a multi-worker
    deployment stores records in the database but serves `/result/<id>` only from
    the worker that created it.
-7. The commands are run from the project root; PowerShell is used for the Windows
+7. **Structured fields are proposals, not facts.** `app/fields.py` reads them from
+   the text with documented rules (§4.1) and marks how confident each rule was; the
+   review page exists so a human confirms them. A document whose layout the rules do
+   not recognise simply leaves fields empty - the text is still extracted and
+   stored.
+8. **The browser flow stores on `/review/save`, never on `/upload`.** The JSON API
+   keeps extracting *and* storing in one call (§4.2) because there is no reviewer in
+   front of it.
+9. The commands are run from the project root; PowerShell is used for the Windows
    examples, with `bash` alternatives where a shell is involved.
+
 
 ### Limitations and known issues
 
 | # | Limitation / issue | Detail, and what to do about it |
 |---|---|---|
 | 1 | **The MySQL path was never run against a live server** | The development machine has no MySQL server (and no Docker), so MySQL is covered by `tests/test_database.py` (a recording fake of the PyMySQL surface) and by checking that `sql/mysql_schema.sql` contains exactly the DDL `app/database.py` builds. The DDL is plain InnoDB/utf8mb4 using only `IF NOT EXISTS`. **Do one connect against your server as the final acceptance check** (`/database` -> *Connect & create schema*, or `POST /api/database/connect`). SQLite, by contrast, was executed for real end to end (schema comparison, seed data, uploads, search, records view, export, delete). |
-| 2 | **No schema migrations** | Tables are created with `CREATE TABLE IF NOT EXISTS`; an existing table is never altered. A future column would need an explicit `ALTER TABLE`, so pointing an older database at a newer build can leave columns missing. |
+| 2 | **Schema changes are limited to adding the field columns** | `CREATE TABLE IF NOT EXISTS` still leaves an existing table alone, and the **only** automatic upgrade is the one this submission needed: connecting (or *Create schema*) probes the columns and adds the five structured field columns with `ALTER TABLE ... ADD COLUMN` (§5), so a database from an earlier build keeps working. Any *further* column would need its own explicit `ALTER TABLE` - there is still no general migration framework, no version table and no down-migration. |
 | 3 | **SQLite `LIKE` is case-insensitive for ASCII only** | The records search is case-insensitive in ASCII for both stores; with the SQLite store, case-insensitive matching does **not** happen for accented or non-Latin text (MySQL's utf8mb4 collation is not ASCII limited), so the same query can behave differently on the two stores. |
 | 4 | **Search is `LIKE '%term%'`, not full text** | The term is matched against `filename`/`content` (plus the record id when it is numeric). It is bounded, escaped and always bound as a parameter, but every row's `content` is inspected - there is no full-text index and no relevance ranking. |
 | 5 | **Results expire** | `/result/<id>` and its `.txt` download only work while the result sits in the in-memory cache (30 minutes, 50 entries by default). The stored record survives, and `/database/records/<id>` is the permanent view. |
@@ -800,6 +955,10 @@ that the list is complete.
 | 12 | **The sample images depend on an OS font** | `tools/make_samples.py` renders them with Arial (Windows) or DejaVu (Linux), so file digests and the last digit of the confidence values differ between machines. The recognised text does not. |
 | 13 | **Without Tesseract the OCR tests are skipped, not failed** | `pytest -q` then reports the subset that needs no engine (validation, storage, units). `tools/verify_samples.py` exits `2` with the install hint instead of pretending to have checked the images. |
 | 14 | **The first-page preview is a PNG data URI** | Only page 1 of a PDF is rendered for the thumbnail (`PREVIEW_MAX_PX`) and it is embedded directly in the HTML page, which makes the result page a little larger. |
+| 15 | **The field rules are heuristics** | They are label driven, so an invoice with unusual wording (`Rechnungsnummer` without a colon, a total written only as `Summe`) leaves fields empty rather than guessing wrongly; the review page is where that is fixed by hand. `dd/mm/yyyy` and `mm/dd/yyyy` are ambiguous, so day-first wins unless the first number cannot be a day - `03/04/2026` is read as 3 April 2026. A bare `1.234` is read as 1234 (thousands), and only a *labelled* total is trusted at 90 % - everything else is marked as a guess. |
+| 16 | **A batch is validated before it is OCR'd** | If one file in the batch is unsupported or too large, the whole submit is refused (nothing is extracted, nothing is stored) so a typo in the file list cannot leave half a batch behind. Remove or rename the file and upload again. |
+| 17 | **The review page lives in the in-memory result cache** | The card's fields and text are re-read from the cache when the form is submitted (`result_id`), so if a result expires between upload and save (`RESULT_TTL_SECONDS`, 30 minutes) that document cannot be stored any more - the page says so, and re-uploading it is the fix. |
+
 
 ## 14. Submission package: SQL scripts, sample files and the ZIP
 
@@ -812,8 +971,9 @@ them twice changes nothing.
 
 | Script | Target | Contents |
 |---|---|---|
-| `sql/mysql_schema.sql` | MySQL 8.0 | `CREATE DATABASE IF NOT EXISTS flask_ocr` (utf8mb4), both tables with the three indexes, the unique key and the cascading foreign key, **2 seed extractions + 4 page rows** (ids 9001+, so they cannot collide with real uploads), a `SHA2()` step that fills `content_sha256` the way the app does, verification queries and the grants a user needs |
-| `sql/sqlite_schema.sql` | SQLite (the default store) | the same two tables and three indexes, `PRAGMA foreign_keys = ON`, the same seed rows with the real SHA-256 values (stock SQLite has no `SHA2()`) |
+| `sql/mysql_schema.sql` | MySQL 8.0 | `CREATE DATABASE IF NOT EXISTS flask_ocr` (utf8mb4), both tables with the five structured field columns, the three indexes, the unique key and the cascading foreign key, **2 seed extractions + 4 page rows** (ids 9001+, so they cannot collide with real uploads), the seed field values, a commented block with the five `ALTER TABLE ... ADD COLUMN` statements an older table needs, a `SHA2()` step that fills `content_sha256` the way the app does, verification queries and the grants a user needs |
+| `sql/sqlite_schema.sql` | SQLite (the default store) | the same two tables (field columns included) and three indexes, `PRAGMA foreign_keys = ON`, the same seed rows *with* their field values and the real SHA-256 values (stock SQLite has no `SHA2()`), plus the same commented `ALTER TABLE` block |
+
 
 ```powershell
 # MySQL (creates the schema, the tables and the seed rows)
@@ -834,15 +994,18 @@ uploading anything first. Remove them again with
 
 | File | Size | Kind | Pages | Extracted as |
 |---|---|---|---|---|
-| `images/scan_invoice.png` | 22.8 KB | image | 1 | OCR - 53 chars, 95.11 % |
-| `images/scan_receipt.jpg` | 27.1 KB | image | 1 | OCR (JPEG path) - 50 chars, 96.00 % |
+| `images/scan_invoice.png` | 22.8 KB | image | 1 | OCR - 53 chars, 95.11 %, 4 of 5 fields |
+| `images/scan_invoice_fields.png` | 54.5 KB | image | 1 | OCR - 156 chars, 95.3 %, **all five fields labelled** |
+| `images/scan_receipt.jpg` | 27.1 KB | image | 1 | OCR (JPEG path) - 50 chars, 96.00 %, 3 of 5 fields |
 | `images/blank_page.png` | 2.3 KB | image | 1 | OCR - 0 chars, the "no text found" case |
 | `pdf/scanned_invoice_3_pages.pdf` | 75.1 KB | pdf | 3 | OCR on **every** page - 178 chars, 95.47 % |
 | `pdf/digital_report_text_layer.pdf` | 0.7 KB | pdf | 1 | **embedded** text layer, Tesseract never called - 93 chars |
 
-`samples/README.md` documents each file in detail, the expected text, how the files
-are regenerated and how they are verified. They are synthetic (all text is
-fictitious), and they are produced by `tools/make_samples.py`, so the pixel bytes
+`samples/README.md` documents each file in detail, the expected text, the fields it
+must yield, how the files are regenerated and how they are verified. They are
+synthetic (all text is fictitious), and they are produced by
+`tools/make_samples.py`, so the pixel bytes
+
 never have to be committed by hand.
 
 ### Regenerating and verifying them
@@ -850,27 +1013,38 @@ never have to be committed by hand.
 ```powershell
 env\Scripts\python.exe tools\make_samples.py       # (re)write samples/ and print a manifest
 env\Scripts\python.exe tools\verify_samples.py     # upload every sample and check the result
-env\Scripts\python.exe -m pytest -q                # 224 tests
+env\Scripts\python.exe -m pytest -q                # 301 tests
 ```
 
 `tools/verify_samples.py` builds the real application (pointed at a throw-away
 SQLite file), uploads each sample through the HTTP stack and asserts the kind, the
-page count, the extraction method per page, the expected text and that the upload
-was stored - verified both through `GET /api/database/records` and with plain
-`sqlite3` against the file. Its output on this machine:
+page count, the extraction method per page, the expected text, the structured fields
+each document must yield and that the upload was stored - verified both through
+`GET /api/database/records` and with plain `sqlite3` against the file. Its output on
+this machine:
 
 ```
-file                                      HTTP kind   pages extract    chars   conf  record  verdict
-images/scan_invoice.png                    200 image      1 ocr           53   95.1       1  ok
-images/scan_receipt.jpg                    200 image      1 ocr           50   96.0       2  ok
-images/blank_page.png                      200 image      1 ocr            0      -       3  ok
-pdf/scanned_invoice_3_pages.pdf            200 pdf        3 ocr          178   95.5       4  ok
-pdf/digital_report_text_layer.pdf          200 pdf        1 embedded      93      -       5  ok
+file                                      HTTP kind   pages extract    chars   conf fields  record  verdict
+-----------------------------------------------------------------------------------------------------------
+images/scan_invoice.png                    200 image      1 ocr           53   95.1    4/5       1  ok
+images/scan_invoice_fields.png             200 image      1 ocr          156   95.3    5/5       2  ok
+images/scan_receipt.jpg                    200 image      1 ocr           50   96.0    3/5       3  ok
+images/blank_page.png                      200 image      1 ocr            0      -    0/5       4  ok
+pdf/scanned_invoice_3_pages.pdf            200 pdf        3 ocr          178   95.5    1/5       5  ok
+pdf/digital_report_text_layer.pdf          200 pdf        1 embedded      93      -    2/5       6  ok
 
-stored records        : 5 (API) / 5 (SQLite)
-stored pages          : 7 (SQLite), expected 7
-All 5 sample files passed every check.
+stored records        : 6 (API) / 6 (SQLite)
+stored pages          : 8 (SQLite), expected 8
+  #1   scan_invoice.png                   image  pages=1 chars=53 fields=(ACME, 10042, 128.5, EUR) sha256=6bda0ca88e80
+  #2   scan_invoice_fields.png            image  pages=1 chars=156 fields=(Northwind Trading GmbH, INV-2026-0042, 140.42, EUR) sha256=f64350f1e20c
+  #3   scan_receipt.jpg                   image  pages=1 chars=50 fields=(Corner Coffee, -, 3.5, EUR) sha256=283e860214a0
+  #4   blank_page.png                     image  pages=1 chars=0 fields=(-, -, -, -) sha256=e3b0c44298fc
+  #5   scanned_invoice_3_pages.pdf        pdf    pages=3 chars=178 fields=(ACME, -, -, -) sha256=dfdae19e1e5f
+  #6   digital_report_text_layer.pdf      pdf    pages=1 chars=93 fields=(-, -, 1240000.0, EUR) sha256=7c715819b947
+
+All 6 sample files passed every check.
 ```
+
 
 ### Building the ZIP
 
@@ -884,18 +1058,22 @@ the development notes. `env/`, `.git/`, `instance/` (runtime state, SQLite files
 remembered credentials), `dist/` and every `__pycache__` stay out. The script
 re-opens the finished archive and fails if one of the required deliverables
 (README, `run.py`, `requirements.txt`, the app, the tests, both SQL scripts, the
-five sample files) is missing or the archive is corrupt.
+six sample files) is missing or the archive is corrupt.
+
 
 ### What was verified before packaging
 
 | Check | Result |
 |---|---|
-| `pytest -q` (whole suite) | **224 passed** in ~6 s |
-| `tools/verify_samples.py` | **5/5** sample files, 5 records and 7 page rows in a real SQLite file |
+| `pytest -q` (whole suite) | **301 passed** in ~10 s |
+| `tools/verify_samples.py` | **6/6** sample files, 6 records and 8 page rows in a real SQLite file, including the structured fields read back with plain SQL |
+| The review flow (live server) | `POST /upload` with two files -> review page (2 cards, fields pre-filled, **no** record written); correcting a total and saving -> *Stored in SQLite as record #1, #2*; an unreadable amount -> `400` with the message next to the field and nothing stored; `/database/records` shows the reviewed supplier/no./date/total |
 | `sql/sqlite_schema.sql` | applied **twice** (idempotent), then compared with the database the application creates: identical `sqlite_master` DDL and identical `PRAGMA table_info` columns; the seed digests re-computed with `hashlib` match; the app lists, searches (`q=ALPHA`), opens and exports the seeded records |
-| `sql/mysql_schema.sql` | contains **verbatim** the DDL `create_database_sql` / `create_table_sql` / `create_pages_table_sql` produce for the default names. Not executed: no MySQL server here (limitation 1) |
-| Live server (`run.py --port 5055`, SQLite store) | `GET /` 200 (drop zone), `GET /api/health` 200 (`available: true`, `5.4.0.20240606`, `eng`+`osd`), `POST /api/ocr` with `scan_invoice.png` -> 200, 53 chars, 95.11 %, *saved as record #1*, records view renders it, `GET /database/records/export.xlsx` 200 with a real workbook (5,761 bytes), an unsupported `.txt` upload -> **400** |
+| `sql/mysql_schema.sql` | contains **verbatim** the DDL `create_database_sql` / `create_table_sql` / `create_pages_table_sql` produce for the default names (field columns included). Not executed: no MySQL server here (limitation 1) |
+| Schema upgrade | a SQLite file whose `ocr_extractions` table predates the field columns: connecting adds the five columns (`PRAGMA table_info` before/after), the existing rows stay, and saving into the upgraded table works |
+| Live server (`run.py --port 5055`, SQLite store) | `GET /` 200 (drop zone), `GET /api/health` 200 (`available: true`, `5.4.0.20240606`, `eng`+`osd`), `POST /api/ocr` with `scan_invoice.png` -> 200, 53 chars, 95.11 %, fields `{ACME, 10042, null, 128.50, EUR}`, *saved as record #1*, `POST /api/ocr/batch` with two files -> 200 and two records, `POST /api/review/save` -> corrected values stored, records view renders them, `GET /database/records/export.xlsx` 200 with a real workbook, an unsupported `.txt` upload -> **400** |
 | `python -c "import app"` | no import-time side effects: Tesseract is located lazily and a missing engine is reported, not raised (§1) |
+
 
 
 

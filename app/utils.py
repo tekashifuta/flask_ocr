@@ -56,9 +56,11 @@ def upload_limits(config=None) -> dict:
         "allowed_extensions": config.get("ALLOWED_EXTENSIONS_LABEL", "JPG, JPEG, PNG, PDF"),
         "max_upload_bytes": limit,
         "max_upload": human_size(limit) if limit else "unlimited",
+        "max_batch_files": config.get("MAX_BATCH_FILES"),
         "max_pdf_pages": config.get("MAX_PDF_PAGES"),
         "languages": config.get("OCR_LANGUAGES"),
         "dpi": config.get("OCR_DPI"),
         "result_ttl_seconds": ttl,
         "result_ttl": human_duration(ttl),
     }
+

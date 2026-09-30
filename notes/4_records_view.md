@@ -2,6 +2,11 @@
 
 Everything is complete and verified. Here's the summary.
 
+> **Update (one table):** the copy of the table on `/database` (and the
+> `database.html` inclusion of `_records.html` it needed) was removed as redundant - the
+> records view is the only page that lists the store. See
+> `notes/12_stored_extractions_section_removed.md`.
+
 ## What was added
 
 ### Storage layer — `app/database.py`

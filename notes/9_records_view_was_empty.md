@@ -3,6 +3,10 @@
 Reported after the show-everything change: the records view showed no data. The view
 was right - **the store was empty, because nothing had ever been written to it.**
 
+> **Update (one table):** the "/database has a form above it" branch described below is
+> gone - `/database` no longer embeds the records table at all. See
+> `notes/12_stored_extractions_section_removed.md`.
+
 ## Diagnosis (what was actually wrong)
 
 * The only store on this machine, `instance/ocr_records.sqlite3`, held **0 rows** in

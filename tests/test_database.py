@@ -46,11 +46,29 @@ from app.exceptions import (
     InvalidDatabaseSettingsError,
 )
 from app.excel import XLSX_MIMETYPE
+from app.fields import FIELD_ORDER
 from app.ocr import ExtractionResult, PageResult
+
 
 BACKTICKED = re.compile(r"`([A-Za-z0-9_]+)`")
 INSERT_COLUMNS = re.compile(r"\(([^)]*)\)\s*values", re.IGNORECASE)
 LIKE_COLUMN = re.compile(r"`([A-Za-z0-9_]+)` like %s", re.IGNORECASE)
+#: Column definition of one part of a ``CREATE TABLE`` body: a quoted name followed
+#: by its type.  ``PRIMARY KEY (...)``, ``KEY ...``, ``UNIQUE KEY ...`` and
+#: ``CONSTRAINT ...`` do not start with a quoted name, which is what keeps them out.
+DDL_COLUMN = re.compile(r"^\s*`([A-Za-z0-9_]+)`\s+[A-Za-z]")
+
+
+def ddl_columns(statement: str) -> set[str]:
+    """The column names a ``CREATE TABLE`` declares."""
+    body = statement[statement.index("(") + 1 : statement.rindex(")")]
+    return {
+        match.group(1)
+        for match in (DDL_COLUMN.match(part) for part in body.split(","))
+        if match
+    }
+
+
 
 
 def columns_of(statement: str) -> list[str]:
@@ -125,6 +143,10 @@ class FakeConnection:
     ) -> None:
         self.schemas = set(schemas)
         self.tables = set(tables)
+        #: Table -> its column names, filled in by ``CREATE TABLE`` (what
+        #: ``information_schema.COLUMNS`` answers with on a real server).
+        self.columns: dict[str, set[str]] = {}
+
         self.records = list(records or [])
         self.server_version = server_version
         self.pages_table = pages_table
@@ -180,11 +202,28 @@ class FakeConnection:
             self.schemas.add(first_backticked(statement))
             return [], -1, 1
         if lowered.startswith("create table"):
-            self.tables.add(first_backticked(statement))
+            table = first_backticked(statement)
+            if table not in self.tables:
+                # ``IF NOT EXISTS``: an existing table keeps its columns, which is
+                # precisely why the structured fields need their own ALTER TABLE.
+                self.columns[table] = ddl_columns(statement)
+            self.tables.add(table)
+            return [], -1, 0
+
+        if "information_schema" in lowered and "column_name" in lowered:
+            # ``_table_columns``: which columns the (possibly old) table has.
+            names = self.columns.get(params[1], set())
+            return ([{"COLUMN_NAME": name} for name in sorted(names)], -1, len(names))
+        if lowered.startswith("alter table"):
+            name = first_backticked(statement)
+            added = re.search(r"add column `([A-Za-z0-9_]+)`", lowered)
+            if added:
+                self.columns.setdefault(name, set()).add(added.group(1))
             return [], -1, 0
         if "information_schema" in lowered and "table_name" in lowered:
             found = params[0] in self.schemas and params[1] in self.tables
             return ([{"TABLE_NAME": params[1]}] if found else []), -1, int(found)
+
         if "select database()" in lowered:
             return [{"current_database": self.current_database}], -1, 1
         if "select version()" in lowered:
@@ -361,9 +400,15 @@ def fake_mysql(monkeypatch):
             previous = connections[-1]
             connection.schemas |= previous.schemas
             connection.tables |= previous.tables
+            # The same columns too: reconnecting must not look like a fresh table,
+            # or every connect would try to add the structured field columns again.
+            connection.columns = {
+                table: set(columns) for table, columns in previous.columns.items()
+            }
             connection.records = list(previous.records)
             connection.page_rows = list(previous.page_rows)
             connection.next_id = previous.next_id
+
         connection.kwargs = kwargs
         connections.append(connection)
         return connection
@@ -560,6 +605,51 @@ def test_ensure_schema_recreates_a_dropped_table(fake_mysql):
 
     assert database.ensure_schema() is True
     assert f"{DEFAULT_TABLE}_pages" in connection.tables
+
+
+def test_the_created_table_carries_the_structured_field_columns(fake_mysql):
+    """A fresh table is the whole contract the INSERT relies on."""
+    _, connection = connect_database(fake_mysql)
+
+    columns = connection.columns[DEFAULT_TABLE]
+    assert set(FIELD_ORDER) <= columns
+    assert columns == ddl_columns(create_table_sql(DEFAULT_TABLE)), (
+        "the fake model and the real DDL agree"
+    )
+
+
+
+def test_connect_adds_the_structured_columns_to_an_older_table(fake_mysql):
+    """A store created before the fields existed is upgraded, not abandoned."""
+    database = MySqlDatabase(MySqlSettings(host="db.internal"))
+    database.connect()  # creates the schema and both (current) tables
+    first = fake_mysql[-1]
+    # Now pretend the server holds the table as the *previous* version built it.
+    first.columns[DEFAULT_TABLE] = ddl_columns(create_table_sql(DEFAULT_TABLE)) - set(
+        FIELD_ORDER
+    )
+
+    database.connect()  # a new connection: same server, an older table
+
+    connection = fake_mysql[-1]
+    alters = [s for s in connection.statements if s.lower().startswith("alter table")]
+    assert len(alters) == len(FIELD_ORDER)
+    assert all("ADD COLUMN" in statement and "NULL" in statement for statement in alters)
+    assert set(FIELD_ORDER) <= connection.columns[DEFAULT_TABLE]
+    assert database.tables_created is False, "adding columns is not creating tables"
+
+
+def test_a_second_connect_adds_nothing(fake_mysql):
+    """The upgrade is idempotent - a restart must not repeat the DDL."""
+    database, connection = connect_database(fake_mysql)
+
+    database.connect()
+
+    assert [
+        s for s in fake_mysql[-1].statements if s.lower().startswith("alter table")
+    ] == []
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1375,20 +1465,22 @@ def test_record_delete_from_the_ui_redirects(make_client, fake_mysql, tmp_path):
     assert fake_mysql[0].records == []
 
 
-def test_database_page_lists_the_stored_records(make_client, fake_mysql, tmp_path):
+def test_database_page_leaves_the_records_to_the_records_view(
+    make_client, fake_mysql, tmp_path
+):
+    """The connection page shows the store; the rows are listed in the records view."""
     client = make_client(MYSQL_SETTINGS_FILE=str(tmp_path / "mysql.json"))
     client.post("/api/database/connect", json={"host": "db.internal", "user": "ocr"})
     fake_mysql[0].records = [stored_row(1), stored_row(2, filename="second.pdf")]
 
     body = client.get("/database").get_data(as_text=True)
 
-    assert "archived.pdf" in body
-    assert "second.pdf" in body
-    assert "2026-01-02 03:04:05 UTC" in body
-    assert "93.25%" in body
-    assert "/database/records/1" in body
-    assert "Nothing stored yet" not in body
+    assert "Stored extractions" not in body, "the table lives in the records view only"
+    assert "archived.pdf" not in body and "second.pdf" not in body
+    assert "Search stored records" not in body, "no search toolbar either"
+    assert ">Records view</a>" in body, "but the page links to the table"
     assert "ocr@db.internal:3306/flask_ocr" in body, "the status panel names the server"
+    assert "<dt>Stored records</dt>" in body, "and still counts the stored rows"
 
 
 def test_record_page_renders_the_stored_pages(make_client, fake_mysql, tmp_path):
@@ -1489,16 +1581,9 @@ def test_records_page_without_a_connection_offers_the_form(client):
         "the records page has no form of its own, so it links to the one that has"
     )
     assert '<a href="/database">MySQL storage</a>' in body, "and to the storage page"
-    assert "Connect to a MySQL server above to see (and store) extractions." not in body, (
-        "there is no connection form above the records view"
+    assert "Nothing is connected yet, so extractions are not being stored" in body, (
+        "the empty table explains how to connect - there is no form above the records view"
     )
-
-
-def test_database_page_without_a_connection_points_at_the_form_above(client):
-    body = client.get("/database").get_data(as_text=True)
-
-    assert "Connect to a MySQL server above to search the stored records." in body
-    assert "Connect to a MySQL server above to see (and store) extractions." in body
 
 
 def test_records_page_reports_a_server_that_stopped_answering(make_client, fake_mysql, tmp_path):
@@ -1654,18 +1739,6 @@ def test_records_page_shows_ten_rows_a_page_with_numbered_pages(
     assert 'aria-disabled="true">Next &raquo;' in last, "Next is off on the last page"
 
 
-def test_database_page_pages_the_same_table_in_place(make_client, fake_mysql, tmp_path):
-    client = paged_client(make_client, fake_mysql, tmp_path, 25)
-
-    body = page_text(client.get("/database?limit=10"))
-
-    assert "Showing rows 1-10 of 25 stored records (page 1 of 3)." in body
-    assert "doc-16.pdf" in body and "doc-15.pdf" not in body
-    assert 'href="/database?scope=all&amp;limit=10&amp;page=2"' in body, (
-        "the page buttons stay on the admin page they were clicked on"
-    )
-
-
 def test_records_page_clamps_a_page_past_the_end_and_a_silly_one(
     make_client, fake_mysql, tmp_path
 ):
@@ -1696,7 +1769,7 @@ def test_records_page_pages_a_search_and_keeps_the_filters(make_client, fake_mys
     )
 
 
-def test_records_view_is_linked_from_the_pages_that_list_records(
+def test_records_view_is_linked_from_the_upload_and_storage_pages(
     make_client, fake_mysql, tmp_path
 ):
     client = make_client(MYSQL_SETTINGS_FILE=str(tmp_path / "mysql.json"))
@@ -1707,24 +1780,6 @@ def test_records_view_is_linked_from_the_pages_that_list_records(
     client.post("/api/database/connect", json={"host": "db.internal", "user": "ocr"})
     fake_mysql[0].records = [stored_row(1)]
     assert 'href="/database/records"' in client.get("/database/records/1").get_data(as_text=True)
-
-
-def test_database_page_carries_the_search_into_the_records_table(
-    make_client, fake_mysql, tmp_path
-):
-    client = make_client(MYSQL_SETTINGS_FILE=str(tmp_path / "mysql.json"))
-    client.post("/api/database/connect", json={"host": "db.internal", "user": "ocr"})
-    fake_mysql[0].records = [stored_row(1), stored_row(2, filename="second.pdf")]
-
-    body = client.get("/database?q=second").get_data(as_text=True)
-
-    assert "second.pdf" in body
-    assert "archived.pdf" not in body
-    assert 'value="second"' in body
-    assert 'action="/database"' in body, "the same page searches in place"
-    assert 'name="next" value="/database?q=second"' in body, (
-        "deleting a row returns to this search"
-    )
 
 
 def test_delete_from_the_records_view_returns_to_the_search(make_client, fake_mysql, tmp_path):
@@ -1754,7 +1809,9 @@ def test_delete_ignores_an_off_site_next_target(make_client, fake_mysql, tmp_pat
     )
 
     assert response.status_code == 303
-    assert response.headers["Location"] == "/database", "only same-site paths are honoured"
+    assert response.headers["Location"] == "/database/records", (
+        "only same-site paths are honoured, and the records view is the fallback"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2010,7 +2067,7 @@ def test_record_export_404s_for_an_unknown_id(make_client, fake_mysql, tmp_path)
     assert "not stored in" in response.get_data(as_text=True)
 
 
-def test_the_pages_that_list_records_offer_the_export(make_client, fake_mysql, tmp_path):
+def test_the_records_view_offers_the_export(make_client, fake_mysql, tmp_path):
     client = make_client(MYSQL_SETTINGS_FILE=str(tmp_path / "mysql.json"))
     client.post("/api/database/connect", json={"host": "db.internal", "user": "ocr"})
 
@@ -2025,9 +2082,6 @@ def test_the_pages_that_list_records_offer_the_export(make_client, fake_mysql, t
     assert (
         "/database/records/export.xlsx?scope=all&amp;limit=5&amp;q=invoice" in body
     ), "the export carries the filters of the table above it"
-    assert "Export .xlsx" in client.get("/database?q=invoice").get_data(as_text=True), (
-        "the same table on the database page offers it too"
-    )
 
 
 
@@ -2055,16 +2109,27 @@ def connected_client(make_client, fake_mysql, tmp_path):
 
 
 def test_upload_stores_the_extraction_in_mysql(
-    make_client, fake_mysql, tmp_path, text_pdf_factory
+    make_client, fake_mysql, tmp_path, text_pdf_factory, review_save
 ):
+    """The browser flow stores **after** the review, with the reviewed fields."""
     client = connected_client(make_client, fake_mysql, tmp_path)
+    document = text_pdf_factory(DIGITAL_PDF_TEXT + "\nTotal: 42.00 EUR")
 
-    response = upload_document(client, text_pdf_factory(DIGITAL_PDF_TEXT), "digital.pdf")
+    review = upload_document(client, document, "digital.pdf")
+
+    assert review.status_code == 200
+    assert "nothing has been stored yet" in review.get_data(as_text=True)
+    assert "Save the reviewed data to MySQL" in review.get_data(as_text=True)
+    assert fake_mysql[0].records == [], "uploading alone must not write to the store"
+
+    response = review_save(client, review, total_amount_0="128.50")
     body = response.get_data(as_text=True)
 
+
     assert response.status_code == 200
-    assert "Saved to MySQL as" in body
+    assert "Stored in MySQL as" in body
     assert "#1" in body
+    assert "128.50" in body, "the corrected value is what the page reports back"
 
     connection = fake_mysql[0]
     assert len(connection.records) == 1
@@ -2072,24 +2137,28 @@ def test_upload_stores_the_extraction_in_mysql(
     assert stored["filename"] == "digital.pdf"
     assert DIGITAL_PDF_TEXT[:30] in stored["content"]
     assert stored["page_count"] == 1
+    assert stored["total_amount"] == "128.50", "the reviewer's correction is stored"
+    assert stored["currency"] == "EUR"
     assert stored["uploaded_at"].tzinfo is None
     assert len(connection.page_rows) == 1
 
 
 def test_upload_can_opt_out_of_mysql_storage(
-    make_client, fake_mysql, tmp_path, text_pdf_factory
+    make_client, fake_mysql, tmp_path, text_pdf_factory, review_save
 ):
     client = connected_client(make_client, fake_mysql, tmp_path)
+    review = upload_document(client, text_pdf_factory(DIGITAL_PDF_TEXT), "digital.pdf")
 
-    response = upload_document(
-        client, text_pdf_factory(DIGITAL_PDF_TEXT), "digital.pdf", save_to_db="0"
-    )
+    response = review_save(client, review, save_to_db="0")
     body = response.get_data(as_text=True)
 
+
     assert response.status_code == 200
-    assert "Saved to MySQL" not in body
+    assert "Stored in MySQL" not in body
+    assert "storing was switched off" in body
     assert fake_mysql[0].records == []
     assert fake_mysql[0].page_rows == []
+
 
 
 def test_api_ocr_saves_and_reports_the_record(
@@ -2112,19 +2181,23 @@ def test_api_ocr_saves_and_reports_the_record(
 
 
 def test_extraction_survives_a_broken_database(
-    make_client, fake_mysql, tmp_path, text_pdf_factory
+    make_client, fake_mysql, tmp_path, text_pdf_factory, review_save
 ):
     """A failing INSERT must not cost the user the text they waited for."""
     client = connected_client(make_client, fake_mysql, tmp_path)
     fake_mysql[0].fail_on = "insert into"
+    review = upload_document(client, text_pdf_factory(DIGITAL_PDF_TEXT), "digital.pdf")
 
-    response = upload_document(client, text_pdf_factory(DIGITAL_PDF_TEXT), "digital.pdf")
+    response = review_save(client, review)
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert "selectable text layer" in body, "the extraction is still shown"
-    assert "storing it in MySQL failed" in body
+    assert "This document was not stored" in body, "the failure is reported next to it"
+    assert "simulated failure" in body
     assert fake_mysql[0].rollbacks == 1
+    assert fake_mysql[0].records == []
+
 
 
 def test_upload_without_a_connection_is_unchanged(client, text_pdf_factory):

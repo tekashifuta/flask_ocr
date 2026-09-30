@@ -1,0 +1,36 @@
+{# Read-only view of one document's structured fields (app/fields.py).
+   Included with ``fields`` (a DocumentFields) and an optional ``fields_heading``.
+   The badges describe where each value came from: a label in the document
+   ("90% match"), a heuristic, "reviewed" (a human confirmed or typed it) - or
+   "not found" when the field is still empty. #}
+{% if fields %}
+<h3 class="fields-heading">{{ fields_heading or "Structured fields" }}</h3>
+{% if fields.is_empty %}
+  <p class="empty-page">
+    Nothing was recognised as a supplier, invoice number, date or total - the fields
+    stay empty rather than guessing.
+  </p>
+{% endif %}
+<dl class="fields">
+  {% for field in fields %}
+  <div class="field-row">
+    <dt>{{ field.label }}</dt>
+    <dd>
+      {% if field.value %}
+        <span class="field-value">
+          {%- if field.kind == 'amount' %}{{ '%.2f'|format(field.value|float) }}
+          {%- else %}{{ field.value }}{% endif -%}
+        </span>
+        <span class="badge badge-{{ field.quality }}" title="{{ field.hint }}">
+          {%- if field.confidence is not none %}{{ field.confidence|round|int }}% match
+          {%- else %}reviewed{% endif -%}
+        </span>
+      {% else %}
+        <span class="field-empty">&mdash;</span>
+        <span class="badge badge-missing">not found</span>
+      {% endif %}
+    </dd>
+  </div>
+  {% endfor %}
+</dl>
+{% endif %}

@@ -29,6 +29,11 @@ USE `flask_ocr`;
 -- ---------------------------------------------------------------------------
 -- 1. ocr_extractions - one row per processed upload
 -- ---------------------------------------------------------------------------
+-- `supplier`, `invoice_number`, `document_date`, `total_amount` and `currency`
+-- are the structured fields (app/fields.py): the reviewed supplier, invoice
+-- number, document date, total amount and its currency.  NULL = not read / not
+-- given.  They sit between `engine_version` and `content_sha256`, exactly where
+-- the application's own DDL puts them.
 CREATE TABLE IF NOT EXISTS `ocr_extractions` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `filename` VARCHAR(255) NOT NULL,
@@ -43,6 +48,11 @@ CREATE TABLE IF NOT EXISTS `ocr_extractions` (
   `size_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `ocr_language` VARCHAR(64) NULL,
   `engine_version` VARCHAR(64) NULL,
+  `supplier` VARCHAR(255) NULL,
+  `invoice_number` VARCHAR(64) NULL,
+  `document_date` DATE NULL,
+  `total_amount` DECIMAL(12,2) NULL,
+  `currency` CHAR(3) NULL,
   `content_sha256` CHAR(64) NULL,
   `stored_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -50,6 +60,20 @@ CREATE TABLE IF NOT EXISTS `ocr_extractions` (
   KEY `idx_ocr_extractions_filename` (`filename`),
   KEY `idx_ocr_extractions_sha256` (`content_sha256`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+-- A database created by an earlier version of this project has the same table
+-- without the five structured field columns.  Connecting from /database (or
+-- POST /database/schema) adds them automatically - MySQL has no
+-- "ADD COLUMN IF NOT EXISTS", so these are the statements it runs, and they are
+-- only needed once:
+--
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `supplier` VARCHAR(255) NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `invoice_number` VARCHAR(64) NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `document_date` DATE NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `total_amount` DECIMAL(12,2) NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `currency` CHAR(3) NULL;
+
 
 -- ---------------------------------------------------------------------------
 -- 2. ocr_extractions_pages - one row per page, cascading with its extraction
@@ -110,6 +134,21 @@ Line two of the scanned document
 ACME purchase order CHARLIE
 Line three of the scanned document',
    'pdf', 3, 178, 30, 95.47, 983, 76897, 'eng', '5.4.0.20240606', NULL);
+
+-- The structured fields those two documents produce (app/fields.py).  Scanning a
+-- document proposes values with a confidence; the review page is where a human
+-- confirms or corrects them, and these rows hold what was confirmed.  The 3 page
+-- purchase order has no label the parser trusts, so it keeps only the supplier it
+-- guessed from the header line.
+UPDATE `ocr_extractions`
+   SET `supplier` = 'ACME',
+       `invoice_number` = '10042',
+       `document_date` = NULL,
+       `total_amount` = 128.50,
+       `currency` = 'EUR'
+ WHERE `id` = 9001;
+UPDATE `ocr_extractions` SET `supplier` = 'ACME' WHERE `id` = 9002;
+
 
 -- The application fills `content_sha256` on every upload; do the same here
 -- (SHA2 is part of MySQL, so the digests are real, not invented).

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -34,6 +34,7 @@ from .database import (
     normalize_search_scope,
 )
 from .exceptions import (
+    BatchLimitExceededError,
     DatabaseError,
     DatabaseRecordNotFoundError,
     EmptyFileError,
@@ -41,11 +42,22 @@ from .exceptions import (
     MissingFileError,
     ResultExpiredError,
     UnsupportedFileTypeError,
+    UploadValidationError,
 )
 from .excel import XLSX_EXTENSION, XLSX_MIMETYPE, records_workbook
+from .fields import FIELD_ORDER, DocumentFields, validate_fields
 from .ocr import ExtractionResult, extract_text
+from .review import (
+    ReviewBatch,
+    ReviewDocument,
+    checkbox_value,
+    documents_from,
+    parse_form,
+    submitted_result_ids,
+)
 from .storage import ResultStore
 from .utils import human_size, upload_limits
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,16 +80,12 @@ def _database() -> DatabaseManager:
 # ---------------------------------------------------------------------------
 # upload handling
 # ---------------------------------------------------------------------------
-def _read_upload() -> tuple[str, bytes]:
-    """Validate the submitted multipart field and return ``(filename, bytes)``.
+def _read_one_upload(storage) -> tuple[str, bytes]:
+    """Validate one submitted file and return ``(filename, bytes)``.
 
     The extension is only a first filter - :func:`app.ocr.documents.extract_text`
     still verifies the real file signature before anything is OCR'd.
     """
-    storage = request.files.get("file")
-    if storage is None or not (storage.filename or "").strip():
-        raise MissingFileError("Choose a JPG, PNG or PDF file to upload.")
-
     filename = secure_filename(storage.filename) or "upload"
     suffix = Path(filename).suffix.lower()
     allowed = current_app.config["ALLOWED_EXTENSIONS"]
@@ -99,8 +107,54 @@ def _read_upload() -> tuple[str, bytes]:
     return filename, data
 
 
+def _read_upload() -> tuple[str, bytes]:
+    """The submitted multipart field as one file (the JSON API's shape).
+
+    A request that carries several files is refused here: one document per call is
+    the contract of ``POST /api/ocr``, and ``POST /api/ocr/batch`` is the endpoint
+    that takes a batch - silently ignoring the extra files would hide them.
+    """
+    storage = request.files.get("file")
+    if storage is None or not (storage.filename or "").strip():
+        raise MissingFileError("Choose a JPG, PNG or PDF file to upload.")
+    extra = [
+        item
+        for item in request.files.getlist("file")
+        if item is not storage and (item.filename or "").strip()
+    ]
+    if extra:
+        raise BatchLimitExceededError(
+            f"POST /api/ocr takes one file, but {len(extra) + 1} were submitted. "
+            "Use POST /api/ocr/batch to send a batch."
+        )
+    return _read_one_upload(storage)
+
+
+def _read_uploads() -> list[tuple[str, bytes]]:
+    """Every submitted file, validated, up to ``MAX_BATCH_FILES``.
+
+    The files are validated as a batch on purpose: the first problem is reported and
+    nothing is OCR'd, so a typo in one file name cannot cost twenty Tesseract runs
+    and leave the user with half a result.  The whole request body is still bounded
+    by ``MAX_UPLOAD_MB``.
+    """
+    submitted = request.files.getlist("file") or request.files.getlist("files")
+    files = [item for item in submitted if (item.filename or "").strip()]
+    if not files:
+        raise MissingFileError("Choose one or more JPG, PNG or PDF files to upload.")
+
+    limit = max(1, int(current_app.config.get("MAX_BATCH_FILES") or 1))
+    if len(files) > limit:
+        raise BatchLimitExceededError(
+            f"{len(files)} files were submitted, but one upload accepts at most "
+            f"{limit}. Split the batch and try again (MAX_BATCH_FILES raises the cap)."
+        )
+    return [_read_one_upload(item) for item in files]
+
+
 @dataclass(frozen=True)
 class ExtractionOutcome:
+
     """One completed extraction and the stored record it produced (if any).
 
     Persisting is deliberately non-fatal: an unreachable database must never cost
@@ -124,17 +178,15 @@ def _truthy(value: object, default: bool = False) -> bool:
 def _checkbox_field(name: str, default: bool) -> bool:
     """Read a ``<hidden>`` + ``<checkbox>`` pair out of the submitted form.
 
-    The upload and connect forms each submit the same field **twice**: a hidden ``0``
-    (so an unticked box still sends something) and then the checkbox itself (``1``
-    when ticked).  ``request.form.get()`` would return only the hidden ``0`` - which
-    silently turned storing off, and stopped "Remember these details" from ever being
-    written, however the box was set - so *any* truthy value wins and a request that
-    sends no such field at all (the JSON API) keeps *default*.
+    The upload, review and connect forms each submit the same field **twice**: a
+    hidden ``0`` (so an unticked box still sends something) and then the checkbox
+    itself (``1`` when ticked).  ``request.form.get()`` would return only the hidden
+    ``0`` - which silently turned storing off, and stopped "Remember these details"
+    from ever being written, however the box was set - so *any* truthy value wins and
+    a request that sends no such field at all (the JSON API) keeps *default*.
     """
-    values = request.form.getlist(name)
-    if not values:
-        return default
-    return any(_truthy(value) for value in values)
+    return checkbox_value(request.form.getlist(name), default)
+
 
 
 def _remember_requested(payload) -> bool:
@@ -151,25 +203,40 @@ def _remember_requested(payload) -> bool:
     return _truthy(payload.get("remember"), default)
 
 
-def _should_save_to_database() -> bool:
-    """Save when connected and the caller did not opt out for this upload."""
+def _should_save_to_database(payload=None) -> bool:
+    """Save when connected and the caller did not opt out for this submit.
+
+    *payload* is the parsed JSON body of an API request; without it the flag comes
+    from the submitted form (the hidden + checkbox pair - see
+    :func:`_checkbox_field`).
+    """
     manager = _database()
     if not manager.is_connected:
         return False
     config = current_app.config
     # ``MYSQL_AUTO_SAVE`` is the older name of the same flag.
     auto_save = bool(config.get("DATABASE_AUTO_SAVE", config.get("MYSQL_AUTO_SAVE", True)))
+    if payload is not None:
+        return _truthy(payload.get("save_to_db", payload.get("save")), auto_save)
     return _checkbox_field("save_to_db", auto_save)
 
 
-def _persist(result: ExtractionResult) -> tuple[int | None, str | None]:
-    """Write *result* to the connected store, returning ``(record_id, error)``."""
+def _persist(
+    result: ExtractionResult, fields=None
+) -> tuple[int | None, str | None]:
+    """Write *result* (with its structured fields) to the store.
+
+    Returns ``(record_id, error)`` - a failure is reported next to the result rather
+    than raised, because an unreachable database must never cost the user the text
+    they just waited for.  *fields* are the **reviewed** values; without them the
+    ones the parser proposed are stored.
+    """
     if not _should_save_to_database():
         return None, None
     database = _database()
     label = database.labels.label
     try:
-        record_id = database.save_extraction(result)
+        record_id = database.save_extraction(result, fields=fields)
     except DatabaseError as exc:
         logger.error("Could not save %r to %s: %s", result.filename, label, exc.message)
         return None, exc.message
@@ -177,8 +244,8 @@ def _persist(result: ExtractionResult) -> tuple[int | None, str | None]:
     return record_id, None
 
 
-def _extract_and_store(filename: str, data: bytes) -> ExtractionOutcome:
-    """Run the OCR pipeline, cache the result and optionally store it in the database."""
+def _extract(filename: str, data: bytes) -> ExtractionOutcome:
+    """Run the OCR pipeline and cache the result - without writing to the store."""
     config = current_app.config
     result = extract_text(
         data,
@@ -195,13 +262,20 @@ def _extract_and_store(filename: str, data: bytes) -> ExtractionOutcome:
     )
     result_id = _store().put(result)
     logger.debug("Stored extraction %s for %r", result_id, result.filename)
-    record_id, database_error = _persist(result)
-    return ExtractionOutcome(
-        result_id=result_id,
-        result=result,
-        record_id=record_id,
-        database_error=database_error,
-    )
+    return ExtractionOutcome(result_id=result_id, result=result)
+
+
+def _extract_and_store(filename: str, data: bytes) -> ExtractionOutcome:
+    """Extract one document and store it straight away (the JSON API's path).
+
+    The browser never takes this shortcut: it goes through the **review** page, where
+    the fields can be corrected before anything is written (``/upload`` ->
+    ``/review/save``).
+    """
+    outcome = _extract(filename, data)
+    record_id, database_error = _persist(outcome.result)
+    return replace(outcome, record_id=record_id, database_error=database_error)
+
 
 
 def result_payload(
@@ -228,6 +302,12 @@ def result_payload(
             "languages": result.languages,
         },
         "text": result.full_text(),
+        # The structured fields the review page shows: the plain values plus how sure
+        # the parser was about each one (``null`` = not found / not reviewed).
+        "fields": result.structured_fields.to_dict(),
+        "field_confidence": {
+            value.key: value.confidence for value in result.structured_fields
+        },
         "pages": [
             {
                 "page_number": page.page_number,
@@ -241,7 +321,9 @@ def result_payload(
             for page in result.pages
         ],
         "download_url": url_for("main.download_result", result_id=result_id),
+        "review_url": url_for("main.review_result", result_id=result_id),
         "database": {
+
             "connected": _database().is_connected,
             "saved": record_id is not None,
             "record_id": record_id,
@@ -264,6 +346,105 @@ def _render_result(outcome: ExtractionOutcome, **extra):
 
 
 # ---------------------------------------------------------------------------
+# review: nothing is stored before a human has seen the fields
+# ---------------------------------------------------------------------------
+#: What ``/review/save`` says when there is nowhere to write to.
+NO_STORE_MESSAGE = (
+    "Nothing was stored: no {label} store is connected. Connect one from the "
+    "Database page and save again, or copy the text - it stays in the result cache "
+    "for a short while."
+)
+#: ... and when the reviewer switched storing off for this submit.
+STORE_SWITCHED_OFF_MESSAGE = (
+    "Nothing was stored: storing was switched off for this submit. The text and the "
+    "reviewed fields are still shown here."
+)
+
+
+def _render_review(batch: ReviewBatch, **extra):
+    """Render the review page for a batch of extracted documents."""
+    return render_template(
+        "review.html",
+        batch=batch,
+        limits=upload_limits(),
+        database=_database_status_payload(),
+        field_keys=FIELD_ORDER,
+        **extra,
+    )
+
+
+def _batch_from_ids(result_ids) -> ReviewBatch:
+    """Rebuild the batch a review form was rendered from, caching rules included.
+
+    The extracted text never travels through the browser: the form only carries the
+    ``result_id`` of each document, and the result itself is read back out of the
+    in-memory cache.  A result that has expired meanwhile cannot be stored any more,
+    which is reported as a notice instead of failing the whole submit.
+    """
+    documents = []
+    notices: list[str] = []
+    for result_id in result_ids:
+        result = _store().get(result_id)
+        if result is None:
+            notices.append(
+                "One document's result has expired and can no longer be stored "
+                f"(result {result_id[:8]}...). Upload it again to keep it."
+            )
+            continue
+        documents.append((result_id, result))
+    if not documents:
+        raise ResultExpiredError(
+            "Those results are no longer available. Results are only kept for a "
+            "short while - please upload the documents again."
+        )
+    return ReviewBatch(documents=documents_from(documents), notices=tuple(notices))
+
+
+def _batch_from_form() -> ReviewBatch:
+    """The batch named by the submitted review form."""
+    result_ids = submitted_result_ids(request.form)
+    if not result_ids:
+        raise UploadValidationError(
+            "That review form did not name any document. Open the review page from "
+            "the result you want to store and submit it again."
+        )
+    return _batch_from_ids(result_ids)
+
+
+def _save_batch(batch: ReviewBatch) -> ReviewBatch:
+    """Store every ticked document with its **reviewed** fields.
+
+    Returns a new batch carrying one outcome per document: the new record id, or the
+    reason there is none.  Unticked documents are left alone, and a document whose
+    save fails does not stop the others - a batch of twenty invoices must not be lost
+    because one of them collided with a dead connection.
+    """
+    manager = _database()
+    if not manager.is_connected:
+        return replace(
+            batch, submitted=True, database_error=NO_STORE_MESSAGE.format(label=manager.labels.label)
+        )
+    if not _should_save_to_database():
+        return replace(batch, submitted=True, database_error=STORE_SWITCHED_OFF_MESSAGE)
+
+    documents: list[ReviewDocument] = []
+    for document in batch.documents:
+        if not document.included:
+            documents.append(document)
+            continue
+        try:
+            record_id = manager.save_extraction(document.result, fields=document.fields)
+        except DatabaseError as exc:
+            logger.error("Could not save %r: %s", document.filename, exc.message)
+            documents.append(replace(document, error=exc.message))
+            continue
+        logger.debug("Stored %r as record %s", document.filename, record_id)
+        documents.append(replace(document, record_id=record_id))
+    return replace(batch, documents=tuple(documents), submitted=True)
+
+
+
+# ---------------------------------------------------------------------------
 # pages
 # ---------------------------------------------------------------------------
 @bp.get("/")
@@ -276,10 +457,51 @@ def index():
 
 @bp.post("/upload")
 def upload():
-    """Accept a file, extract its text and render the result page."""
-    filename, data = _read_upload()
-    outcome = _extract_and_store(filename, data)
-    return _render_result(outcome)
+    """Accept one or more files, extract them and render the **review** page.
+
+    Nothing is written to the store here.  The reviewer sees the structured fields
+    next to the extracted text, corrects what OCR got wrong and submits the form to
+    ``/review/save`` - that is the only place the browser flow stores anything.
+    """
+    files = _read_uploads()
+    documents = [_extract(filename, data) for filename, data in files]
+    batch = ReviewBatch(
+        documents=documents_from((item.result_id, item.result) for item in documents)
+    )
+    return _render_review(batch)
+
+
+@bp.get("/review/<result_id>")
+def review_result(result_id: str):
+    """Review a cached result again (one document, e.g. from the result page)."""
+    result = _store().get(result_id)
+    if result is None:
+        raise ResultExpiredError(
+            "That result is no longer available. Results are only kept for a short "
+            "while - please upload the document again."
+        )
+    return _render_review(
+        ReviewBatch(documents=documents_from([(result_id, result)]))
+    )
+
+
+@bp.post("/review/save")
+def review_save():
+    """Validate the reviewed fields and store the selected documents.
+
+    A value that cannot be read sends the page back with the message next to its
+    field and *nothing* stored: a typo can never end up in the database as a
+    different value, and the reviewer retries with everything else they typed still
+    on screen.  The response is ``400`` in that case and ``200`` once the submit was
+    accepted (whether the store took every row is reported per document).
+    """
+    batch = _batch_from_form()
+    reviewed, notices = parse_form(request.form, batch.documents)
+    batch = replace(batch, documents=reviewed, notices=batch.notices + notices)
+    if not batch.is_valid:
+        logger.info("Review rejected: %s field(s) could not be read", batch.field_error_count)
+        return _render_review(batch), 400
+    return _render_review(_save_batch(batch))
 
 
 @bp.get("/result/<result_id>")
@@ -292,6 +514,7 @@ def show_result(result_id: str):
             "while - please upload the document again."
         )
     return _render_result(ExtractionOutcome(result_id=result_id, result=result))
+
 
 
 @bp.get("/result/<result_id>/download")
@@ -330,6 +553,7 @@ def api_health():
                     "max_upload": human_size(current_app.config.get("MAX_CONTENT_LENGTH")),
                     "allowed_extensions": sorted(current_app.config["ALLOWED_EXTENSIONS"]),
                     "max_pdf_pages": current_app.config["MAX_PDF_PAGES"],
+                    "max_batch_files": current_app.config["MAX_BATCH_FILES"],
                     "min_embedded_text_chars": current_app.config["MIN_EMBEDDED_TEXT_CHARS"],
                 },
                 "database": {
@@ -350,7 +574,13 @@ def api_health():
 
 @bp.post("/api/ocr")
 def api_ocr():
-    """Same pipeline as ``/upload`` but returns JSON - script/automation friendly."""
+    """Same pipeline as ``/upload`` but returns JSON - script/automation friendly.
+
+    The JSON API has no review step (there is no human in the loop), so a single
+    upload is stored straight away unless the caller passes ``save_to_db=0``.  The
+    response carries the ``fields`` the parser read and a ``review_url``, and
+    ``POST /api/review/save`` stores corrected values afterwards.
+    """
     filename, data = _read_upload()
     outcome = _extract_and_store(filename, data)
     return (
@@ -364,6 +594,148 @@ def api_ocr():
         ),
         200,
     )
+
+
+@bp.post("/api/ocr/batch")
+def api_ocr_batch():
+    """The same pipeline for several files at once - one JSON entry per document.
+
+    Every file is stored immediately (opt out with ``save_to_db=0``) and each entry
+    has exactly the shape ``POST /api/ocr`` answers with, so a client can already
+    parse one document and simply loop over the list for many.  To correct a value
+    before it is stored, use ``POST /api/review/save`` and the ``review_url`` of the
+    result (or ``false`` for ``save_to_db`` on this endpoint).
+    """
+    files = _read_uploads()
+    results = []
+    for filename, data in files:
+        outcome = _extract_and_store(filename, data)
+        results.append(
+            result_payload(
+                outcome.result,
+                outcome.result_id,
+                record_id=outcome.record_id,
+                database_error=outcome.database_error,
+            )
+        )
+    saved = sum(1 for payload in results if payload["database"]["saved"])
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "count": len(results),
+                "saved": saved,
+                "results": results,
+            }
+        ),
+        200,
+    )
+
+
+@bp.post("/api/review/save")
+def api_review_save():
+    """Store **corrected** structured fields for one or more cached results.
+
+    Body::
+
+        {"documents": [{"result_id": "8f0d...", "fields": {"supplier": "Acme"},
+                        "save": true}, ...],
+         "save_to_db": true}
+
+    A single document may also be sent flat (``result_id`` plus ``fields``).  Only
+    the fields that are present are applied - the rest keeps what the parser read
+    (see :func:`app.fields.validate_fields`).  An unreadable value answers ``400``
+    with the message per field and stores nothing, so a correction is never silently
+    dropped.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise UploadValidationError(
+            "Send a JSON object, e.g. {\"documents\": [{\"result_id\": \"...\", "
+            "\"fields\": {\"total_amount\": \"128.50\"}}]}."
+        )
+
+    entries = payload.get("documents")
+    if entries is None and payload.get("result_id"):
+        entries = [payload]
+    if not isinstance(entries, list) or not entries:
+        raise UploadValidationError(
+            "No documents to save: send \"documents\": [{\"result_id\": ...}] "
+            "(or a single object with both \"result_id\" and \"fields\")."
+        )
+
+    save = _should_save_to_database(payload)
+    manager = _database()
+    documents = []
+    errors: dict[str, dict] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not str(entry.get("result_id") or "").strip():
+            raise UploadValidationError(
+                f"Document {index + 1} of the request has no \"result_id\"."
+            )
+        result_id = str(entry["result_id"]).strip()
+        result = _store().get(result_id)
+        if result is None:
+            errors[result_id] = {"result_id": [RESULT_EXPIRED_FOR_API]}
+            continue
+
+        base = result.structured_fields
+        fields, field_errors = validate_fields(entry.get("fields"), base=base)
+        if field_errors:
+            errors[result_id] = field_errors
+            continue
+
+        record_id = None
+        if save and _truthy(entry.get("save", True), True):
+            record_id = manager.save_extraction(result, fields=fields)
+        documents.append(
+            {
+                "result_id": result_id,
+                "filename": result.filename,
+                "fields": fields.to_dict(),
+                "corrected": [
+                    key for key in FIELD_ORDER if fields.value(key) != base.value(key)
+                ],
+                "saved": record_id is not None,
+                "record_id": record_id,
+            }
+        )
+
+    if errors:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_field_value",
+                        "message": "Some values could not be read; nothing was stored.",
+                    },
+                    "fields": errors,
+                }
+            ),
+            400,
+        )
+
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "connected": manager.is_connected,
+                "count": len(documents),
+                "saved": sum(1 for document in documents if document["saved"]),
+                "documents": documents,
+            }
+        ),
+        200,
+    )
+
+
+#: The JSON API's answer for a result that expired between upload and review.
+RESULT_EXPIRED_FOR_API = (
+    "That result is no longer available (they are kept for a short while only) - "
+    "upload the document again."
+)
+
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +946,32 @@ def _page_count(total: int, limit: int) -> int:
     return max(1, -(-total // limit))  # ceil, without floating point
 
 
-def _records_view(*, endpoint: str = "main.database_page", error: str | None = None) -> dict:
+def _field_summary(record: dict) -> str | None:
+    """One line for the records table: ``ACME · 10042 · 2026-03-15 · 128.50 EUR``.
+
+    The amount is formatted with two decimals because both backends hand back a
+    number (``128.5``), not the reviewed text - a ledger wants ``128.50``.
+    """
+    parts: list[str] = [record.get("supplier"), record.get("invoice_number")]
+    document_date = record.get("document_date")
+    if document_date:
+        parts.append(
+            document_date.isoformat()
+            if hasattr(document_date, "isoformat")
+            else str(document_date)
+        )
+    amount = record.get("total_amount")
+    if amount is not None:
+        try:
+            money = f"{float(amount):.2f}"
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            money = str(amount)
+        currency = record.get("currency")
+        parts.append(f"{money} {currency}".strip() if currency else money)
+    return " · ".join(str(part) for part in parts if part) or None
+
+
+def _records_view(*, error: str | None = None) -> dict:
     """Everything the records table needs: one page of rows, its filters, a summary.
 
     The listing is **paged**: ``limit`` rows per page and ``page`` to walk the rest.
@@ -584,11 +981,16 @@ def _records_view(*, endpoint: str = "main.database_page", error: str | None = N
     (``COUNT(*)``), which is what lets the page buttons know how many pages there are
     - and a ``?page=`` past the end lands on the last page instead of an empty table.
 
+    The table belongs to the **records view** (``/database/records``) and nowhere
+    else, so every link it builds - the toolbar's action, the page buttons, the
+    export - points there.
+
     Reading is best-effort by design: without a live connection (or when the last
     statement failed) the table still renders and ``error`` says why.
     """
     manager = _database()
     filters = _record_filters()
+    endpoint = "main.database_records_page"
     view = {
         **filters,
         "action": endpoint,
@@ -604,6 +1006,8 @@ def _records_view(*, endpoint: str = "main.database_page", error: str | None = N
         "count": 0,
         "total": 0,
         "pages": 1,
+        "fields_summary": {},
+
         "page_links": [],
         "prev_url": None,
         "next_url": None,
@@ -632,7 +1036,9 @@ def _records_view(*, endpoint: str = "main.database_page", error: str | None = N
         count=len(records),
         total=total,
         pages=pages,
+        fields_summary={record.get("id"): _field_summary(record) for record in records},
         page_links=_page_links(page, pages, endpoint, filters),
+
         prev_url=_page_url(endpoint, filters, page - 1) if page > 1 else None,
         next_url=_page_url(endpoint, filters, page + 1) if page < pages else None,
         range_label=f"{offset + 1}-{offset + len(records)}" if records else "",
@@ -717,13 +1123,11 @@ def _local_path(value: object) -> str | None:
 
 
 def _render_database_page(*, error=None, message=None, form=None, status=200):
-    """Connection form + live status + the records table."""
+    """Connection form + live status.  The stored rows are browsed in the records view."""
     manager = _database()
-    view = _records_view(error=error)
     html = render_template(
         "database.html",
         database=_database_status_payload(),
-        records_view=view,
         error=error,
         message=message,
         form={**manager.form_defaults(), **(form or {})},
@@ -734,7 +1138,11 @@ def _render_database_page(*, error=None, message=None, form=None, status=200):
 
 @bp.get("/database")
 def database_page():
-    """Connect a store (MySQL server or local SQLite file) and browse what was stored."""
+    """Connect a store (MySQL server or local SQLite file) and report its state.
+
+    Only the connection lives here; the records themselves are listed, searched and
+    exported by the records view (``/database/records``), which this page links to.
+    """
     return _render_database_page()
 
 
@@ -798,7 +1206,7 @@ def database_records_page():
     return render_template(
         "records.html",
         database=_database_status_payload(),
-        records_view=_records_view(endpoint="main.database_records_page"),
+        records_view=_records_view(),
         limits=upload_limits(),
     )
 
@@ -849,10 +1257,16 @@ def database_records_export():
 
 @bp.get("/database/records/<int:record_id>")
 def database_record(record_id: int):
-    """One stored extraction, with its per-page text."""
+    """One stored extraction, with its per-page text and its stored fields."""
     record = _database().require_extraction(record_id)
     return render_template(
-        "record.html", record=record, database=_database().status(), limits=upload_limits()
+        "record.html",
+        record=record,
+        # The fields as they were stored: reviewed values lose their confidence, which
+        # is exactly what the "reviewed" badge in the partial says.
+        stored_fields=DocumentFields.from_mapping(record),
+        database=_database().status(),
+        limits=upload_limits(),
     )
 
 
@@ -898,8 +1312,9 @@ def database_record_delete(record_id: int):
     manager.require_extraction(record_id)  # 404 when it is already gone
     manager.delete_extraction(record_id)
     logger.info("Deleted stored record %s", record_id)
-    # Back to the list the button was on, with its search still applied.
-    target = _local_path(request.form.get("next")) or url_for("main.database_page")
+    # Back to the records view (every delete button lives there), with its search
+    # still applied.
+    target = _local_path(request.form.get("next")) or url_for("main.database_records_page")
     return redirect(target, code=303)
 
 

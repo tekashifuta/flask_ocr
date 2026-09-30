@@ -440,6 +440,11 @@ def test_records_workbook_lays_out_records_pages_and_filters():
             {
                 "id": 1,
                 "filename": "invoice.pdf",
+                "supplier": "ACME GmbH",
+                "invoice_number": "10042",
+                "document_date": "2026-03-15",
+                "total_amount": 128.5,
+                "currency": "EUR",
                 "uploaded_at": "2026-01-02 03:04:05 UTC",
                 "kind": "pdf",
                 "page_count": 2,
@@ -475,9 +480,22 @@ def test_records_workbook_lays_out_records_pages_and_filters():
     assert sheet_names(payload) == ["Records", "Pages", "Export"]
 
     records = sheet_cells(payload, 1)
-    assert records[0][:3] == ["#", "File name", "Uploaded (UTC)"]
+    assert records[0][:7] == [
+        "#",
+        "File name",
+        "Supplier",
+        "Invoice number",
+        "Date",
+        "Total amount",
+        "Currency",
+    ]
+    assert records[0][7] == "Uploaded (UTC)"
     assert records[1][0] == "1" and records[1][1] == "invoice.pdf"
+    assert records[1][2:7] == ["ACME GmbH", "10042", "2026-03-15", "128.5", "EUR"], (
+        "the structured fields travel with the export"
+    )
     assert records[1][-1] == "ACME invoice total", "the export carries the full text"
+
 
     pages = sheet_cells(payload, 2)
     assert pages[0][:4] == ["Record #", "File name", "Page", "Method"]
@@ -537,7 +555,7 @@ def test_run_py_says_where_the_records_go(caplog, tesseract_command):
     with caplog.at_level(logging.WARNING, logger="run"):
         run.report_store(unconnected)
 
-    assert "uploads are NOT saved" in caplog.text
+    assert "reviewed data is NOT saved" in caplog.text
     assert "DATABASE_AUTO_CONNECT=1" in caplog.text, "and how to fix it"
 
     caplog.clear()
@@ -555,6 +573,6 @@ def test_run_py_says_where_the_records_go(caplog, tesseract_command):
     with caplog.at_level(logging.INFO, logger="run"):
         run.report_store(connected)
 
-    assert "Storing extractions in SQLite" in caplog.text
+    assert "Storing reviewed extractions in SQLite" in caplog.text
     assert "/database/records" in caplog.text, "it points at the records view"
 

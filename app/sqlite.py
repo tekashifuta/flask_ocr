@@ -48,6 +48,7 @@ from .database import (
     EXPORT_COLUMNS,
     EXPORT_PAGE_COLUMNS,
     EXTRACTIONS_COLUMNS,
+    FIELD_COLUMNS,
     MAX_FILENAME_CHARS,
     PAGES_COLUMNS,
     PAGES_TABLE_SUFFIX,
@@ -57,6 +58,7 @@ from .database import (
     clamp_record_offset,
     content_sha256,
     derived_name,
+    extraction_params,
     quote_identifier,
     sanitize_identifier,
     search_clause,
@@ -73,6 +75,7 @@ from .exceptions import (
     DatabaseWriteError,
     InvalidDatabaseSettingsError,
 )
+from .fields import FIELD_ORDER, DocumentFields
 from .ocr import ExtractionResult
 
 logger = logging.getLogger(__name__)
@@ -98,21 +101,36 @@ LIST_COLUMNS = (
     "`id`, `filename`, `uploaded_at`, `kind`, `page_count`, `char_count`, "
     "`word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`, "
     "`engine_version`, `stored_at`, "
+    f"{FIELD_COLUMNS}, "
     "SUBSTR(`content`, 1, ?) AS `preview`, LENGTH(`content`) AS `content_chars`"
 )
+
+#: The structured fields (app/fields.py) in one file: TEXT, except the amount, which
+#: is REAL so ``ORDER BY`` and a spreadsheet treat it as the number it is.
+SQLITE_FIELD_COLUMN_TYPES: dict[str, str] = {
+    "supplier": "TEXT",
+    "invoice_number": "TEXT",
+    "document_date": "TEXT",
+    "total_amount": "REAL",
+    "currency": "TEXT",
+}
+
 
 
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
 def create_table_sql(table: str) -> str:
-    """DDL for the parent table: one row per extraction.
+    """DDL for the parent table: one row per extraction, structured fields included.
 
     ``INTEGER PRIMARY KEY AUTOINCREMENT`` is SQLite's auto increment (it *is* the
     rowid, so it behaves like MySQL's ``BIGINT UNSIGNED AUTO_INCREMENT``), and
     ``stored_at`` defaults to ``CURRENT_TIMESTAMP`` - which SQLite writes in UTC.
     """
     name = quote_identifier(table, label="Table name", dialect=DIALECT)
+    field_lines = "".join(
+        f"\n  `{column}` {SQLITE_FIELD_COLUMN_TYPES[column]} NULL," for column in FIELD_ORDER
+    )
     return f"""CREATE TABLE IF NOT EXISTS {name} (
   `id` INTEGER PRIMARY KEY AUTOINCREMENT,
   `filename` VARCHAR({MAX_FILENAME_CHARS}) NOT NULL,
@@ -126,10 +144,11 @@ def create_table_sql(table: str) -> str:
   `duration_ms` INTEGER NOT NULL DEFAULT 0,
   `size_bytes` INTEGER NOT NULL DEFAULT 0,
   `ocr_language` VARCHAR(64) NULL,
-  `engine_version` VARCHAR(64) NULL,
+  `engine_version` VARCHAR(64) NULL,{field_lines}
   `content_sha256` CHAR(64) NULL,
   `stored_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 )"""
+
 
 
 def create_pages_table_sql(pages_table: str, extractions_table: str) -> str:
@@ -507,7 +526,49 @@ class SqliteDatabase:
                 created = True
         for statement in create_index_sql(self.settings.table):
             self._execute(statement)
+        self._add_field_columns()
         return created
+
+    def _table_columns(self, table: str) -> set[str]:
+        """The column names of *table*, straight from ``PRAGMA table_info``."""
+        try:
+            rows = self._fetchall(f"PRAGMA table_info({quote_identifier(table, dialect=DIALECT)})")
+        except sqlite_error_types() as exc:
+            logger.debug("Column probe for %s failed (%s); assuming none", table, exc)
+            return set()
+        names = set()
+        for row in rows:
+            try:
+                names.add(str(row["name"]))
+            except (KeyError, IndexError, TypeError):
+                names.add(str(row[1]))
+        return names
+
+    def _add_field_columns(self, table: str | None = None) -> tuple[str, ...]:
+        """Add the structured field columns to a file created before they existed.
+
+        ``CREATE TABLE IF NOT EXISTS`` leaves an existing table untouched, so a
+        database written by an older version of this application would keep failing
+        every save with "no such column".  ``PRAGMA table_info`` tells us what is
+        there and ``ALTER TABLE ADD COLUMN`` adds the rest - in place, without
+        touching a single stored row (the older rows simply hold ``NULL`` fields).
+        """
+        target = table or self.settings.table
+        existing = self._table_columns(target)
+        if not existing:
+            return ()
+        missing = tuple(name for name in FIELD_ORDER if name not in existing)
+        if not missing:
+            return ()
+        name = quote_identifier(target, dialect=DIALECT)
+        for column in missing:
+            self._execute(
+                f"ALTER TABLE {name} ADD COLUMN `{column}` "
+                f"{SQLITE_FIELD_COLUMN_TYPES[column]} NULL"
+            )
+        logger.info("Added %s structured field column(s) to %s", len(missing), target)
+        return missing
+
 
     def _table_exists(self, table: str) -> bool | None:
         """``True``/``False``, or ``None`` when the file would not tell us."""
@@ -523,33 +584,26 @@ class SqliteDatabase:
 
     # -- writes ----------------------------------------------------------
     def save_extraction(
-        self, result: ExtractionResult, *, uploaded_at: datetime | None = None
+        self,
+        result: ExtractionResult,
+        *,
+        uploaded_at: datetime | None = None,
+        fields: DocumentFields | None = None,
     ) -> int:
         """Insert one extraction (plus its pages) and return the new record id.
 
         Both inserts share a transaction, so a failure leaves no half-written record
-        behind.  ``uploaded_at`` defaults to "now" in UTC.
+        behind.  ``uploaded_at`` defaults to "now" in UTC.  *fields* are the
+        **reviewed** structured values; without it the ones the parser proposed are
+        stored (see :func:`app.database.resolve_fields`).
         """
         content = result.full_text()
         timestamp = stored_timestamp(as_utc(uploaded_at))
         columns = ", ".join(f"`{name}`" for name in EXTRACTIONS_COLUMNS)
         placeholders = ", ".join([PLACEHOLDER] * len(EXTRACTIONS_COLUMNS))
         sql = f"INSERT INTO {self._table()} ({columns}) VALUES ({placeholders})"
-        params = (
-            (result.filename or "upload")[:MAX_FILENAME_CHARS],
-            timestamp,
-            content,
-            result.kind,
-            result.page_count,
-            result.char_count,
-            result.word_count,
-            result.confidence,
-            result.duration_ms,
-            result.size_bytes,
-            result.languages,
-            result.tesseract_version,
-            content_sha256(content),
-        )
+        params = extraction_params(result, content, timestamp, fields)
+
 
         with self._lock:
             connection = self._ensure_healthy()

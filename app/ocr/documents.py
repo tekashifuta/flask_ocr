@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -29,8 +29,10 @@ from ..exceptions import (
     EncryptedPdfError,
     PageLimitExceededError,
 )
+from ..fields import DocumentFields, extract_fields
 from . import images
 from .engine import TesseractEngine
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,15 @@ class ExtractionResult:
     tesseract_version: str | None = None
     preview_data_uri: str | None = None
     size_bytes: int = 0
+    #: Structured fields (supplier, invoice number, date, total) pulled out of the
+    #: text - see :mod:`app.fields`.  ``None`` only for a hand built result.
+    fields: DocumentFields | None = None
+
+    @property
+    def structured_fields(self) -> DocumentFields:
+        """The fields as an object, never ``None`` (handy in templates)."""
+        return self.fields or DocumentFields.empty()
+
 
     @property
     def page_count(self) -> int:
@@ -228,6 +239,10 @@ def extract_text(
         preview_data_uri=preview,
         size_bytes=len(data),
     )
+    # The structured fields describe exactly the text the result page, the download
+    # and the database row carry, so they are read from the finished result.
+    result = replace(result, fields=extract_fields(result.full_text(), filename=filename))
+
     logger.info(
         "Extracted %s from %r in %sms (%s page(s), %s chars, %s OCR page(s))",
         kind,

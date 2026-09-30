@@ -1,10 +1,8 @@
-{# Shared records view: the search toolbar, the table of stored extractions and the
-   page buttons.  Included by ``database.html`` and ``records.html`` - both pass
-   ``records_view`` (the rows, filters, paging, summary; every stored record unless
-   the toolbar narrows the page) and ``database`` (connection status/row count).
-   ``records_view.action`` says which page this is, so the "nothing connected" copy
-   can point at the connection form when it is not on this page. #}
-{% set connection_form_above = records_view.action == 'main.database_page' %}
+{# The records view: the search toolbar, the table of stored records and the page
+   buttons.  Included by ``records.html`` only, which passes ``records_view`` (the rows,
+   filters, paging, summary; every stored record unless the toolbar narrows the page)
+   and ``database`` (connection status/row count).  This page has no connection form of
+   its own, so "nothing connected" copy always links to ``/database``. #}
 {% if records_view.error %}
   <p class="notice notice-warning">{{ records_view.error }}</p>
 {% endif %}
@@ -48,13 +46,9 @@
 
 <p class="records-summary">
   {%- if not database.connected -%}
-    {%- if connection_form_above -%}
-      Connect to {{ store.server_phrase }} above to search the stored records.
-    {%- else -%}
-      Nothing is connected yet, so no extraction is stored -
-      <a href="{{ url_for('main.database_page') }}">connect to {{ store.server_phrase }}</a>
-      to search the records.
-    {%- endif -%}
+    Nothing is connected yet, so no extraction is stored -
+    <a href="{{ url_for('main.database_page') }}">connect to {{ store.server_phrase }}</a>
+    to search the records.
   {%- elif records_view.searching -%}
     {{ records_view.total }} match{{ '' if records_view.total == 1 else 'es' }}
     for &ldquo;{{ records_view.q }}&rdquo; in {{ records_view.scope_label|lower }}
@@ -77,8 +71,8 @@
   <table class="records">
     <thead>
       <tr>
-        <th>#</th><th>File name</th><th>Uploaded (UTC)</th><th>Type</th>
-        <th>Pages</th><th>Chars</th><th>Conf.</th><th>Snippet</th><th>Actions</th>
+        <th>#</th><th>File name</th><th>Supplier / no. / date / total</th><th>Uploaded (UTC)</th>
+        <th>Type</th><th>Pages</th><th>Chars</th><th>Conf.</th><th>Snippet</th><th>Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -87,6 +81,10 @@
         <td>{{ record.id }}</td>
         <td class="cell-file">
           <a href="{{ url_for('main.database_record', record_id=record.id) }}">{{ record.filename }}</a>
+        </td>
+        <td class="cell-fields">
+          {% set summary = records_view.fields_summary.get(record.id) %}
+          {% if summary %}{{ summary }}{% else %}&mdash;{% endif %}
         </td>
         <td>{{ record.uploaded_at }}</td>
         <td>{{ record.kind }}</td>
@@ -106,16 +104,12 @@
       </tr>
       {% else %}
       <tr>
-        <td colspan="9" class="records-empty">
+        <td colspan="10" class="records-empty">
           {% if not database.connected %}
-            {%- if connection_form_above -%}
-              Connect to {{ store.server_phrase }} above to see (and store) extractions.
-            {%- else -%}
-              Nothing is connected yet, so extractions are not being stored - open
-              <a href="{{ url_for('main.database_page') }}">{{ store.label }} storage</a>
-              to connect a store (the local SQLite file needs nothing installed) and
-              upload again.
-            {%- endif -%}
+            Nothing is connected yet, so extractions are not being stored - open
+            <a href="{{ url_for('main.database_page') }}">{{ store.label }} storage</a>
+            to connect a store (the local SQLite file needs nothing installed) and
+            upload again.
           {% elif records_view.error %}
             The rows could not be read from the server.
           {% elif records_view.searching %}

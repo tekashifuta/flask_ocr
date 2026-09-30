@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}Review {{ batch.count }} document{{ '' if batch.is_single else 's' }} - Flask OCR{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="result-head">
+    <div>
+      <p class="eyebrow">Review before saving</p>
+      <h1>
+        {% if batch.is_single %}Check the extracted data
+        {% else %}Check the extracted data of {{ batch.count }} documents{% endif %}
+      </h1>
+    </div>
+    <div class="result-actions">
+      {% if database.connected %}
+        <span class="badge badge-embedded">Connected</span>
+      {% else %}
+        <span class="badge badge-ocr">Not connected</span>
+      {% endif %}
+      <a class="button button-ghost" href="{{ url_for('main.index') }}">Upload more</a>
+      <a class="button button-ghost" href="{{ url_for('main.database_records_page') }}">Records</a>
+    </div>
+  </div>
+
+  <p class="lede">
+    The text was already extracted - <strong>nothing has been stored yet</strong>.
+    Correct what OCR misread and press
+    <strong>{% if batch.submitted %}Save again{% else %}Save reviewed data{% endif %}</strong>:
+    the values below are what ends up in the database and in the
+    <code>.xlsx</code> export.
+    {% if not database.connected %}
+      No {{ store.server_term }} is connected, so saving needs
+      <a href="{{ url_for('main.database_page') }}">a store first</a>.
+    {% endif %}
+  </p>
+
+  {% for notice in batch.notices %}
+    <p class="notice notice-warning">{{ notice }}</p>
+  {% endfor %}
+  {% if batch.database_error %}
+    <p class="notice notice-warning">
+      {{ batch.database_error }}
+      {% if not database.connected %}
+        <a href="{{ url_for('main.database_page') }}">Open the database page</a>.
+      {% endif %}
+    </p>
+  {% endif %}
+
+  {% if batch.submitted %}
+  <dl class="stats">
+    <div><dt>Documents</dt><dd>{{ batch.count }}</dd></div>
+    <div><dt>Stored</dt><dd>{{ batch.saved_count }}</dd></div>
+    <div><dt>Corrected</dt><dd>{{ batch.corrected_count }}</dd></div>
+    <div><dt>Left out</dt><dd>{{ batch.skipped|length }}</dd></div>
+  </dl>
+  {% if batch.saved_count %}
+    <p class="notice notice-info">
+      Stored in {{ store.label }} as
+      {% for document in batch.saved -%}
+        <a href="{{ url_for('main.database_record', record_id=document.record_id) }}">record
+        #{{ document.record_id }}</a>{% if not loop.last %}, {% endif %}
+      {%- endfor %}
+      - file name, upload date/time (UTC), the extracted text and the reviewed fields.
+    </p>
+  {% endif %}
+  {% endif %}
+
+  <form class="review-form" id="review-form" action="{{ url_for('main.review_save') }}" method="post">
+    {% for document in batch.documents %}
+      {% set doc_index = loop.index0 %}
+      <article class="review-card">
+        <header class="review-card-head">
+          <div>
+            <h2>{{ document.filename }}</h2>
+            <p class="page-meta">
+              <span class="badge badge-ocr">{{ document.kind|upper }}</span>
+              <span>{{ document.page_count }} page{{ '' if document.page_count == 1 else 's' }}</span>
+              <span>{{ document.char_count }} chars</span>
+              {% if document.confidence is not none %}<span>{{ document.confidence }}% confidence</span>{% endif %}
+              {% if document.is_saved %}
+                <a href="{{ url_for('main.database_record', record_id=document.record_id) }}">record
+                #{{ document.record_id }}</a>
+              {% endif %}
+            </p>
+          </div>
+          <div class="review-card-actions">
+            <a class="button button-tiny"
+               href="{{ url_for('main.show_result', result_id=document.result_id) }}">Open result page</a>
+            {% if not batch.submitted %}
+              <label class="checkbox checkbox-inline">
+                <input type="hidden" name="include_{{ doc_index }}" value="0">
+                <input type="checkbox" name="include_{{ doc_index }}" value="1"
+                       {% if document.included %}checked{% endif %}>
+                <span>Store this document</span>
+              </label>
+            {% endif %}
+          </div>
+        </header>
+
+        <input type="hidden" name="result_id" value="{{ document.result_id }}">
+
+        {% if document.preview_data_uri %}
+          <figure class="preview">
+            <img src="{{ document.preview_data_uri }}" alt="Preview of {{ document.filename }}">
+            <figcaption>First page preview - check the fields against it</figcaption>
+          </figure>
+        {% endif %}
+
+        {% if document.error %}
+          <p class="notice notice-warning">
+            This document was not stored: {{ document.error }}
+          </p>
+        {% elif batch.submitted and not document.included %}
+          <p class="notice notice-info">Left out of this submit - nothing stored.</p>
+        {% endif %}
+
+        <div class="field-grid">
+          {% for field in document.fields %}
+            {% set proposed = document.extracted.get(field.key) %}
+            {% set message = document.error_for(field.key) %}
+            <label class="field{% if message %} is-invalid{% endif %}">
+              <span class="field-head">
+                <span>{{ field.label }}</span>
+                {% if batch.submitted %}
+                  {% if field.value %}
+                    <span class="badge badge-{{ field.quality }}">
+                      {%- if field.confidence is not none %}{{ field.confidence|round|int }}% match
+                      {%- else %}reviewed{% endif -%}
+                    </span>
+                  {% else %}
+                    <span class="badge badge-missing">not found</span>
+                  {% endif %}
+                {% elif field.value and field.value != proposed.value %}
+                  <span class="badge badge-reviewed" data-original="corrected"
+                        data-quality="badge-reviewed">corrected</span>
+                {% elif proposed.value %}
+                  <span class="badge badge-{{ proposed.quality }}"
+                        data-original="{{ proposed.confidence|round|int }}% match"
+                        data-quality="badge-{{ proposed.quality }}">
+                    {{ proposed.confidence|round|int }}% match
+                  </span>
+                {% else %}
+                  <span class="badge badge-missing" data-original="not found"
+                        data-quality="badge-missing">not found</span>
+                {% endif %}
+
+              </span>
+              <input type="text" name="{{ field.key }}_{{ doc_index }}"
+                     value="{{ field.value or '' }}" placeholder="{{ field.example }}"
+                     maxlength="{{ field.max_chars or 255 }}" title="{{ field.hint }}"
+                     autocomplete="off" spellcheck="false" data-field-kind="{{ field.kind }}"
+                     {% if batch.submitted %}readonly{% endif %}>
+              {% if message %}
+                <small class="field-error">{{ message }}</small>
+              {% elif field.source_line %}
+                <small class="field-source">found in <code>{{ field.source_line }}</code></small>
+              {% else %}
+                <small class="field-hint">{{ field.hint }}</small>
+              {% endif %}
+            </label>
+          {% endfor %}
+        </div>
+
+        {% if document.is_empty %}
+          <p class="notice notice-warning">
+            No text could be detected in this document, so there is nothing to store.
+            Very low contrast scans or handwriting often produce an empty result.
+          </p>
+        {% endif %}
+
+        <details class="review-text">
+          <summary>
+            Extracted text{% if document.page_count > 1 %} ({{ document.page_count }} pages){% endif %}
+          </summary>
+          {% if document.char_count %}
+            <pre class="ocr-text">{{ document.result.full_text() }}</pre>
+          {% else %}
+            <p class="empty-page">No text detected on this page.</p>
+          {% endif %}
+        </details>
+      </article>
+    {% endfor %}
+
+    <div class="review-submit">
+      {% if not batch.submitted %}
+        <label class="checkbox">
+          <input type="hidden" name="save_to_db" value="0">
+          <input type="checkbox" name="save_to_db" value="1" checked
+                 {% if not database.connected %}disabled{% endif %}>
+          <span>
+            Save the reviewed data to {{ store.label }}
+            {%- if database.connected %}
+              (<code>{{ database.settings.database }}.{{ database.settings.table }}</code>)
+            {%- else %}
+              - connect a store first
+            {%- endif %}
+          </span>
+        </label>
+      {% endif %}
+      <div class="actions">
+        {% if batch.submitted %}
+          <a class="button button-primary" href="{{ url_for('main.database_records_page') }}">Open the records view</a>
+          <a class="button button-ghost" href="{{ url_for('main.index') }}">Upload more documents</a>
+        {% else %}
+          <button class="button button-primary" type="submit" id="review-submit">
+            <span class="button-label">Save reviewed data</span>
+            <span class="spinner" hidden aria-hidden="true"></span>
+          </button>
+          <a class="button button-ghost" href="{{ url_for('main.index') }}">Discard</a>
+        {% endif %}
+      </div>
+    </div>
+  </form>
+</section>
+{% endblock %}
+
+

@@ -46,19 +46,19 @@ def auto_connect_default() -> bool:
 
 
 def report_store(app) -> None:
-    """Log where the extracted text is being kept, or how to get a store."""
+    """Log where the reviewed data is being kept, or how to get a store."""
     manager = app.extensions["ocr_database"]
     if manager.is_connected:
         status = manager.status()
         settings = status.get("settings") or {}
         logger.info(
-            "Storing extractions in %s (%s) - browse them at /database/records",
+            "Storing reviewed extractions in %s (%s) - browse them at /database/records",
             manager.labels.label,
             status.get("connection_label") or settings.get("label") or "?",
         )
         return
     logger.warning(
-        "No store is connected, so uploads are NOT saved (they only live in the "
+        "No store is connected, so reviewed data is NOT saved (it only lives in the "
         "in-memory result cache). Open /database to connect one, or set "
         "DATABASE_AUTO_CONNECT=1 - with SQLITE_PATH for a local SQLite file."
     )

@@ -110,6 +110,12 @@ class Config:
     MAX_CONTENT_LENGTH = MAX_UPLOAD_MB * 1024 * 1024
     #: Extensions accepted from the upload form (case-insensitive).
     ALLOWED_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".pdf"})
+    #: Files one upload may contain.  The form accepts a batch (``multiple``), every
+    #: file in it is OCR'd, and they are reviewed and stored together - this cap
+    #: keeps one accidental folder selection from starting 500 OCR runs.  The whole
+    #: request body is still bounded by ``MAX_UPLOAD_MB``.
+    MAX_BATCH_FILES = _env_int("MAX_BATCH_FILES", 10)
+
 
     # --- OCR engine ------------------------------------------------------
     TESSERACT_CMD = find_tesseract_cmd()

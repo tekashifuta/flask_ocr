@@ -8,6 +8,7 @@
     initDropzone();
     initCopyButtons();
     initSubmitSpinner();
+    initReviewForm();
     initDatabaseForm();
   });
 
@@ -18,9 +19,12 @@
     if (!dropzone || !input) return;
 
     var filenameLabel = document.getElementById("dropzone-file");
+    var fileList = document.getElementById("dropzone-list");
     var errorBox = document.getElementById("client-error");
-    var allowed = (dropzone.closest("form").dataset.allowed || "").toLowerCase();
-    var maxBytes = parseInt(dropzone.closest("form").dataset.maxBytes || "0", 10);
+    var form = dropzone.closest("form");
+    var allowed = (form.dataset.allowed || "").toLowerCase();
+    var maxBytes = parseInt(form.dataset.maxBytes || "0", 10);
+    var maxFiles = parseInt(form.dataset.maxFiles || "0", 10);
 
     function showError(message) {
       if (!errorBox) return;
@@ -58,10 +62,38 @@
       return (unit === 0 ? value : value.toFixed(1)) + " " + units[unit];
     }
 
-    function describe(file) {
-      if (!filenameLabel) return;
-      filenameLabel.textContent = file ? file.name + " (" + humanSize(file.size) + ")" : "";
-      filenameLabel.hidden = !file;
+    /* One file or a whole batch: the server takes both, so does the page. */
+    function describe(files) {
+      var count = files ? files.length : 0;
+      if (filenameLabel) {
+        filenameLabel.textContent = count === 1
+          ? "1 file selected"
+          : count + " files selected";
+        filenameLabel.hidden = count === 0;
+      }
+      if (!fileList) return;
+      fileList.innerHTML = "";
+      for (var index = 0; index < count; index += 1) {
+        var item = document.createElement("li");
+        item.textContent = files[index].name + " (" + humanSize(files[index].size) + ")";
+        fileList.appendChild(item);
+      }
+      fileList.hidden = count === 0;
+    }
+
+    function checkAll(files) {
+      if (!files || !files.length) {
+        showError("");
+        return true;
+      }
+      if (maxFiles && files.length > maxFiles) {
+        showError(files.length + " files selected - one upload accepts at most " + maxFiles + ".");
+        return false;
+      }
+      for (var index = 0; index < files.length; index += 1) {
+        if (!validate(files[index])) return false;
+      }
+      return true;
     }
 
     dropzone.addEventListener("click", function () { input.click(); });
@@ -73,9 +105,9 @@
     });
 
     input.addEventListener("change", function () {
-      var file = input.files && input.files[0];
-      describe(file);
-      if (file) validate(file);
+      var files = input.files;
+      describe(files);
+      checkAll(files);
     });
 
     ["dragenter", "dragover"].forEach(function (name) {
@@ -96,15 +128,15 @@
       dropzone.classList.remove("is-dragging");
       var files = event.dataTransfer && event.dataTransfer.files;
       if (!files || !files.length) return;
-      var file = files[0];
-      if (!validate(file)) {
+      if (!checkAll(files)) {
         describe(null);
         return;
       }
       input.files = files;
-      describe(file);
+      describe(files);
     });
   }
+
 
   /* ---------- copy buttons ---------- */
   function initCopyButtons() {
@@ -166,9 +198,46 @@
       var label = button.querySelector(".button-label");
       button.disabled = true;
       if (spinner) spinner.hidden = false;
-      if (label) label.textContent = "Extracting text...";
+      if (label) label.textContent = "Extracting and reviewing...";
     });
   }
+
+  /* ---------- review form ---------- */
+  /* Marks a field whose value no longer matches what OCR proposed, and shows the
+     spinner while the reviewed rows are stored.  The server validates every value
+     again, so nothing here is load bearing. */
+  function initReviewForm() {
+    var form = document.getElementById("review-form");
+    if (!form) return;
+
+    form.querySelectorAll(".field input[type='text']").forEach(function (input) {
+      var badge = input.parentNode.querySelector(".badge");
+      if (!badge) return;
+      input.addEventListener("input", function () {
+        var corrected = input.value.trim() !== (input.defaultValue || "").trim();
+        if (corrected) {
+          badge.textContent = "corrected";
+          badge.className = "badge badge-reviewed";
+        } else {
+          badge.textContent = badge.dataset.original || "as read";
+          badge.className = "badge " + (badge.dataset.quality || "badge-missing");
+        }
+        input.parentNode.classList.remove("is-invalid");
+      });
+    });
+
+    var button = document.getElementById("review-submit");
+    if (!button) return;
+    form.addEventListener("submit", function () {
+      if (button.disabled) return;
+      var spinner = button.querySelector(".spinner");
+      var label = button.querySelector(".button-label");
+      button.disabled = true;
+      if (spinner) spinner.hidden = false;
+      if (label) label.textContent = "Saving the reviewed data...";
+    });
+  }
+
 
   /* ---------- MySQL connection form ---------- */
   /* The form works without JavaScript too: it posts to /database/connect and the

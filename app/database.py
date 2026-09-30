@@ -56,7 +56,7 @@ import re
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -68,7 +68,9 @@ from .exceptions import (
     DatabaseWriteError,
     InvalidDatabaseSettingsError,
 )
+from .fields import FIELD_ORDER, DocumentFields
 from .ocr import ExtractionResult
+
 
 try:  # pragma: no cover - exercised through the "driver missing" code paths
     import pymysql
@@ -197,8 +199,26 @@ EXTRACTIONS_COLUMNS = (
     "size_bytes",
     "ocr_language",
     "engine_version",
+    # The structured fields (app/fields.py) - reviewed values, in FIELD_ORDER, so
+    # ``save_extraction`` can bind ``DocumentFields.to_row()`` positionally.
+    *FIELD_ORDER,
     "content_sha256",
 )
+
+#: Column type of every structured field, per dialect.  ``app.sqlite`` uses the
+#: same keys with its own types; both dialects add these columns to a table that
+#: was created before the fields existed (see ``_add_field_columns``).
+MYSQL_FIELD_COLUMN_TYPES: dict[str, str] = {
+    "supplier": "VARCHAR(255)",
+    "invoice_number": "VARCHAR(64)",
+    "document_date": "DATE",
+    "total_amount": "DECIMAL(12,2)",
+    "currency": "CHAR(3)",
+}
+
+#: The ``SELECT`` list of the structured fields, in ``FIELD_ORDER``.
+FIELD_COLUMNS = ", ".join(f"`{name}`" for name in FIELD_ORDER)
+
 
 PAGES_COLUMNS = (
     "page_number",
@@ -216,6 +236,7 @@ LIST_COLUMNS = (
     "`id`, `filename`, `uploaded_at`, `kind`, `page_count`, `char_count`, "
     "`word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`, "
     "`engine_version`, `stored_at`, "
+    f"{FIELD_COLUMNS}, "
     "LEFT(`content`, %s) AS `preview`, LENGTH(`content`) AS `content_chars`"
 )
 
@@ -223,8 +244,9 @@ LIST_COLUMNS = (
 EXPORT_COLUMNS = (
     "`id`, `filename`, `uploaded_at`, `kind`, `page_count`, `char_count`, "
     "`word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`, "
-    "`engine_version`, `stored_at`, `content_sha256`, `content`"
+    f"`engine_version`, {FIELD_COLUMNS}, `stored_at`, `content_sha256`, `content`"
 )
+
 
 #: Columns of one pages row, for the export sheet (one row per page).
 EXPORT_PAGE_COLUMNS = (
@@ -368,11 +390,14 @@ def create_database_sql(database: str, charset: str = DEFAULT_CHARSET) -> str:
 
 
 def create_table_sql(table: str, charset: str = DEFAULT_CHARSET) -> str:
-    """DDL for the parent table: one row per extraction."""
+    """DDL for the parent table: one row per extraction, structured fields included."""
     name = quote_identifier(table, label="Table name")
     uploaded_index = derived_name("idx_", table, "_uploaded_at")
     filename_index = derived_name("idx_", table, "_filename")
     sha_index = derived_name("idx_", table, "_sha256")
+    field_lines = "".join(
+        f"\n  `{column}` {MYSQL_FIELD_COLUMN_TYPES[column]} NULL," for column in FIELD_ORDER
+    )
     return f"""CREATE TABLE IF NOT EXISTS {name} (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `filename` VARCHAR({MAX_FILENAME_CHARS}) NOT NULL,
@@ -386,7 +411,7 @@ def create_table_sql(table: str, charset: str = DEFAULT_CHARSET) -> str:
   `duration_ms` INT UNSIGNED NOT NULL DEFAULT 0,
   `size_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `ocr_language` VARCHAR(64) NULL,
-  `engine_version` VARCHAR(64) NULL,
+  `engine_version` VARCHAR(64) NULL,{field_lines}
   `content_sha256` CHAR(64) NULL,
   `stored_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
@@ -394,6 +419,7 @@ def create_table_sql(table: str, charset: str = DEFAULT_CHARSET) -> str:
   KEY `{filename_index}` (`filename`),
   KEY `{sha_index}` (`content_sha256`)
 ) ENGINE=InnoDB DEFAULT CHARSET={charset}"""
+
 
 
 def create_pages_table_sql(
@@ -442,6 +468,48 @@ def as_utc(uploaded_at: datetime | None) -> datetime:
 def content_sha256(text: str) -> str:
     """Fingerprint of the extracted text - handy for de-duplication queries."""
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+
+def resolve_fields(
+    result: ExtractionResult, fields: DocumentFields | None = None
+) -> DocumentFields:
+    """The structured fields to store: the reviewed ones, else the extracted ones."""
+    return fields if fields is not None else result.structured_fields
+
+
+def extraction_params(
+    result: ExtractionResult,
+    content: str,
+    timestamp,
+    fields: DocumentFields | None = None,
+) -> tuple:
+    """The bound values of one ``ocr_extractions`` row, in ``EXTRACTIONS_COLUMNS`` order.
+
+    Both dialects build their ``INSERT`` from this one list, so a reviewed value can
+    never be bound into the wrong column - and ``content_sha256`` stays last, where
+    the tests (and the ``sql/`` scripts) expect the digest.
+
+    *timestamp* is dialect specific (a ``datetime`` for MySQL, the UTC text for
+    SQLite), which is why the caller passes it in.
+    """
+    reviewed = resolve_fields(result, fields).to_row()
+    return (
+        (result.filename or "upload")[:MAX_FILENAME_CHARS],
+        timestamp,
+        content,
+        result.kind,
+        result.page_count,
+        result.char_count,
+        result.word_count,
+        result.confidence,
+        result.duration_ms,
+        result.size_bytes,
+        result.languages,
+        result.tesseract_version,
+        *(reviewed[name] for name in FIELD_ORDER),
+        content_sha256(content),
+    )
+
 
 
 def whole_number(
@@ -601,9 +669,10 @@ def serialise_timestamp(value: object) -> str | None:
 def serialise_row(row) -> dict:
     """Make a cursor row safe for Jinja and ``jsonify``.
 
-    ``DictCursor`` hands back ``datetime``, ``Decimal`` and ``bytes`` objects;
-    templates and JSON both prefer strings/floats.  ``app.sqlite`` reuses this on
-    ``sqlite3.Row`` objects, which is why it is public.
+    ``DictCursor`` hands back ``datetime``, ``date``, ``Decimal`` and ``bytes``
+    objects; templates and JSON both prefer strings/floats.  ``app.sqlite`` reuses
+    this on ``sqlite3.Row`` objects, which is why it is public.  ``datetime`` is
+    checked **before** ``date`` because it is a subclass of it.
     """
     if row is None:
         return {}
@@ -611,12 +680,17 @@ def serialise_row(row) -> dict:
     for key, value in dict(row).items():
         if isinstance(value, datetime):
             value = serialise_timestamp(value)
+        elif isinstance(value, date):
+            # The structured fields: a MySQL DATE column comes back as a date object,
+            # which neither Jinja nor jsonify accepts.
+            value = value.isoformat()
         elif isinstance(value, Decimal):
             value = float(value)
         elif isinstance(value, (bytes, bytearray)):
             value = bytes(value).decode("utf-8", "replace")
         serialised[str(key)] = value
     return serialised
+
 
 
 def clamp_record_limit(limit: object, default: int = DEFAULT_LIST_LIMIT) -> int:
@@ -928,7 +1002,48 @@ class MySqlDatabase:
             self._execute(statement)
             if existed is False:
                 created = True
+        self._add_field_columns()
         return created
+
+    def _table_columns(self, table: str) -> set[str]:
+        """The column names of *table* (empty when it cannot be read)."""
+        try:
+            rows = self._fetchall(
+                "SELECT `COLUMN_NAME` FROM `information_schema`.`COLUMNS` "
+                "WHERE `TABLE_SCHEMA` = %s AND `TABLE_NAME` = %s",
+                (self.settings.database, table),
+            )
+        except _mysql_error_types() as exc:
+            logger.debug("Column probe for %s failed (%s); assuming none", table, exc)
+            return set()
+        return {str((row or {}).get("COLUMN_NAME") or "") for row in rows}
+
+    def _add_field_columns(self, table: str | None = None) -> tuple[str, ...]:
+        """Add the structured field columns to a table that predates them.
+
+        ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already exists,
+        so a store created before the structured fields were introduced would keep
+        rejecting every save.  MySQL (unlike MariaDB) has no ``ADD COLUMN IF NOT
+        EXISTS``, hence the ``information_schema`` probe; it runs on every connect
+        and on **Create schema**, so an older table is upgraded in place and no data
+        is lost.
+        """
+        target = table or self.settings.table
+        existing = self._table_columns(target)
+        if not existing:
+            return ()
+        missing = tuple(name for name in FIELD_ORDER if name not in existing)
+        if not missing:
+            return ()
+        name = quote_identifier(target, label="Table name")
+        for column in missing:
+            self._execute(
+                f"ALTER TABLE {name} ADD COLUMN `{column}` "
+                f"{MYSQL_FIELD_COLUMN_TYPES[column]} NULL"
+            )
+        logger.info("Added %s structured field column(s) to %s", len(missing), target)
+        return missing
+
 
     def _table_exists(self, table: str) -> bool | None:
         try:
@@ -959,12 +1074,18 @@ class MySqlDatabase:
 
     # -- writes ----------------------------------------------------------
     def save_extraction(
-        self, result: ExtractionResult, *, uploaded_at: datetime | None = None
+        self,
+        result: ExtractionResult,
+        *,
+        uploaded_at: datetime | None = None,
+        fields: DocumentFields | None = None,
     ) -> int:
         """Insert one extraction (plus its pages) and return the new record id.
 
         Both inserts share a transaction, so a failure leaves no half-written
-        record behind.  ``uploaded_at`` defaults to "now" in UTC.
+        record behind.  ``uploaded_at`` defaults to "now" in UTC.  *fields* are the
+        **reviewed** structured values; without it the ones the parser proposed are
+        stored (see :func:`resolve_fields`).
         """
         content = result.full_text()
         timestamp = as_utc(uploaded_at)
@@ -974,21 +1095,8 @@ class MySqlDatabase:
             f"INSERT INTO {quote_identifier(self.settings.table)} "
             f"({columns}) VALUES ({placeholders})"
         )
-        params = (
-            (result.filename or "upload")[:MAX_FILENAME_CHARS],
-            timestamp,
-            content,
-            result.kind,
-            result.page_count,
-            result.char_count,
-            result.word_count,
-            result.confidence,
-            result.duration_ms,
-            result.size_bytes,
-            result.languages,
-            result.tesseract_version,
-            content_sha256(content),
-        )
+        params = extraction_params(result, content, timestamp, fields)
+
 
         with self._lock:
             connection = self._ensure_healthy()

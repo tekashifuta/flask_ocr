@@ -8,6 +8,7 @@ no binary assets and no network access.
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app import create_app
 from app.config import find_tesseract_cmd
+
+#: The hidden field each review card carries - how a test finds the cached results.
+RESULT_ID_FIELD = r'name="result_id" value="([0-9a-f]{32})"'
+
 
 #: First font that exists wins; keeps the suite portable across OSes.
 FONT_CANDIDATES = (
@@ -208,6 +213,44 @@ def upload_file():
         )
 
     return _upload
+
+
+@pytest.fixture()
+def post_upload():
+    """``post_upload(client, (name, bytes), ..., **form) -> response``.
+
+    The browser's batch form: one ``file`` part per document, plus any other form
+    fields (``save_to_db``, ...).
+    """
+
+    def _post(client, *files, url: str = "/upload", **form):
+        data: dict = dict(form)
+        data["file"] = [(io.BytesIO(payload), name) for name, payload in files]
+        return client.post(url, data=data, content_type="multipart/form-data")
+
+    return _post
+
+
+@pytest.fixture()
+def review_save():
+    """``review_save(client, upload_response, **fields) -> response``.
+
+    Submits the review page the way the browser does: the ``result_id`` of every card
+    (which the page carries as a hidden field) plus the - possibly corrected - values
+    of the form as it stands on screen.  Without extra fields it simply confirms what
+    OCR proposed, which is the "review and save" happy path.
+    """
+
+    def _save(client, upload_response, url: str = "/review/save", **fields):
+        body = upload_response.get_data(as_text=True)
+        result_ids = re.findall(RESULT_ID_FIELD, body)
+        assert result_ids, "the review page must name each cached result"
+        data: dict = {"result_id": result_ids}
+        data.update(fields)
+        return client.post(url, data=data)
+
+    return _save
+
 
 
 @pytest.fixture()

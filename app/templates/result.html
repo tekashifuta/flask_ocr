@@ -12,6 +12,9 @@
       <button class="button button-primary" type="button" data-copy-target="full-text">
         Copy all text
       </button>
+      <a class="button button-ghost" href="{{ url_for('main.review_result', result_id=result_id) }}">
+        Review &amp; store
+      </a>
       <a class="button button-ghost"
          href="{{ url_for('main.download_result', result_id=result_id) }}">Download .txt</a>
       <a class="button button-ghost" href="{{ url_for('main.index') }}">New upload</a>
@@ -67,7 +70,11 @@
       <figcaption>First page preview</figcaption>
     </figure>
   {% endif %}
+
+  {% with fields = result.structured_fields %}{% include "_fields.html" %}{% endwith %}
 </section>
+
+
 
 <section class="panel">
   <h2>Extracted text</h2>

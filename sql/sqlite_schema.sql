@@ -33,6 +33,11 @@ PRAGMA foreign_keys = ON;
 -- ---------------------------------------------------------------------------
 -- 1. ocr_extractions - one row per processed upload
 -- ---------------------------------------------------------------------------
+-- `supplier`, `invoice_number`, `document_date`, `total_amount` and `currency`
+-- are the structured fields (app/fields.py): the reviewed supplier, invoice
+-- number, document date, total amount and its currency.  NULL = not read / not
+-- given.  They sit between `engine_version` and `content_sha256`, exactly where
+-- the application's own DDL puts them.
 CREATE TABLE IF NOT EXISTS `ocr_extractions` (
   `id` INTEGER PRIMARY KEY AUTOINCREMENT,
   `filename` VARCHAR(255) NOT NULL,
@@ -47,9 +52,27 @@ CREATE TABLE IF NOT EXISTS `ocr_extractions` (
   `size_bytes` INTEGER NOT NULL DEFAULT 0,
   `ocr_language` VARCHAR(64) NULL,
   `engine_version` VARCHAR(64) NULL,
+  `supplier` TEXT NULL,
+  `invoice_number` TEXT NULL,
+  `document_date` TEXT NULL,
+  `total_amount` REAL NULL,
+  `currency` TEXT NULL,
   `content_sha256` CHAR(64) NULL,
   `stored_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+
+-- A file written by an earlier version of this project has the same table without
+-- the five structured field columns; connecting adds them automatically.  SQLite
+-- has no "ADD COLUMN IF NOT EXISTS" either, so these are the statements it runs
+-- (once):
+--
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `supplier` TEXT NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `invoice_number` TEXT NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `document_date` TEXT NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `total_amount` REAL NULL;
+-- ALTER TABLE `ocr_extractions` ADD COLUMN `currency` TEXT NULL;
+
 
 -- ---------------------------------------------------------------------------
 -- 2. ocr_extractions_pages - one row per page, cascading with its extraction
@@ -88,13 +111,15 @@ CREATE INDEX IF NOT EXISTS `idx_ocr_extractions_sha256` ON `ocr_extractions` (`c
 INSERT OR REPLACE INTO `ocr_extractions`
   (`id`, `filename`, `uploaded_at`, `content`, `kind`, `page_count`, `char_count`,
    `word_count`, `confidence`, `duration_ms`, `size_bytes`, `ocr_language`,
-   `engine_version`, `content_sha256`)
+   `engine_version`, `supplier`, `invoice_number`, `document_date`, `total_amount`,
+   `currency`, `content_sha256`)
 VALUES
   (9001, 'scan_invoice.png', '2026-09-29 21:29:33.940178',
    'ACME invoice 2026
 Invoice no: 10042
 Total: 128.50 EUR',
    'image', 1, 53, 9, 95.11, 218, 23292, 'eng', '5.4.0.20240606',
+   'ACME', '10042', NULL, 128.50, 'EUR',
    '6bda0ca88e801d3a25004efb28e486631de8b79b19ae44e15d8904547b20fc2c'),
   (9002, 'scanned_invoice_3_pages.pdf', '2026-09-29 21:29:35.350399',
    '----- Page 1 of 3 -----
@@ -112,7 +137,9 @@ Line two of the scanned document
 ACME purchase order CHARLIE
 Line three of the scanned document',
    'pdf', 3, 178, 30, 95.47, 983, 76897, 'eng', '5.4.0.20240606',
+   'ACME', NULL, NULL, NULL, NULL,
    'dfdae19e1e5f5afdc17f7c2620a29f17a36c2223c58453e6a90abc47c3a69724');
+
 
 INSERT OR REPLACE INTO `ocr_extractions_pages`
   (`id`, `extraction_id`, `page_number`, `method`, `content`, `char_count`,

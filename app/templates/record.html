@@ -45,6 +45,10 @@
     SHA-256 <code>{{ record.content_sha256 or "n/a" }}</code>
   </p>
 
+  {% with fields = stored_fields, fields_heading = "Stored structured fields" %}
+    {% include "_fields.html" %}
+  {% endwith %}
+
   {% if record.pages %}
     <h2>Stored pages</h2>
     {% for page in record.pages %}

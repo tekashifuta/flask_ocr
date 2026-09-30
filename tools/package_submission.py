@@ -63,14 +63,20 @@ REQUIRED_PATHS = (
     "run.py",
     "requirements.txt",
     "app/routes.py",
+    "app/fields.py",
+    "app/review.py",
     "tests/conftest.py",
+    "tests/test_fields.py",
+    "tests/test_review.py",
     "sql/mysql_schema.sql",
     "sql/sqlite_schema.sql",
     "samples/images/scan_invoice.png",
+    "samples/images/scan_invoice_fields.png",
     "samples/images/scan_receipt.jpg",
     "samples/pdf/scanned_invoice_3_pages.pdf",
     "samples/pdf/digital_report_text_layer.pdf",
 )
+
 
 
 def _is_excluded(path: Path) -> bool:

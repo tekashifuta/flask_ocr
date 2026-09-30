@@ -13,10 +13,15 @@ from __future__ import annotations
 def test_index_renders_upload_form(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert "Drag &amp; drop your file here" in response.get_data(as_text=True)
+    body = response.get_data(as_text=True)
+    assert "Drag &amp; drop your files here" in body
+    assert 'name="file" multiple' in body, "a batch is one form submission"
+    assert "Files per batch" in body
+    assert "review them before anything is saved" in body
 
 
 def test_health_endpoint_reports_engine(client):
+
     response = client.get("/api/health")
     assert response.status_code in (200, 503)
     payload = response.get_json()
@@ -30,7 +35,8 @@ def test_health_endpoint_reports_engine(client):
 def test_upload_without_a_file_is_rejected(client):
     response = client.post("/upload", data={}, content_type="multipart/form-data")
     assert response.status_code == 400
-    assert "Choose a JPG, PNG or PDF" in response.get_data(as_text=True)
+    assert "Choose one or more JPG, PNG or PDF files" in response.get_data(as_text=True)
+
 
 
 def test_unsupported_extension_is_rejected(upload_file, client):

@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+
 
 #: Importing the application (``app``) and the generator (``make_samples``)
 #: needs both directories on ``sys.path`` - this script lives in ``tools/``.
@@ -41,6 +43,28 @@ for _directory in (str(REPO_ROOT), str(TOOLS_DIR)):
 from app import create_app  # noqa: E402  (import after sys.path is prepared)
 from app.config import find_tesseract_cmd  # noqa: E402
 from make_samples import SAMPLES, SAMPLES_DIR, Sample, write_samples  # noqa: E402
+
+
+def normalise(value: object) -> str:
+    """Lower case, letters and digits only - so OCR punctuation cannot fail a check."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def check_fields(sample: Sample, payload: dict) -> list[str]:
+    """Every reason the structured fields do not match what *sample* promises."""
+    expected_fields = sample.expected_fields
+    if not expected_fields:
+        return []
+    fields = payload.get("fields") or {}
+    problems: list[str] = []
+    for key, expected in expected_fields.items():
+        found = fields.get(key)
+        if expected is None:
+            if found:
+                problems.append(f"field {key} is {found!r}, expected none")
+        elif normalise(found) != normalise(expected):
+            problems.append(f"field {key} is {found!r}, expected {expected!r}")
+    return problems
 
 
 def check_payload(sample: Sample, payload: dict) -> list[str]:
@@ -65,9 +89,12 @@ def check_payload(sample: Sample, payload: dict) -> list[str]:
     elif payload.get("char_count"):
         problems.append(f"expected an empty page, got {payload.get('char_count')} characters")
 
+    problems.extend(check_fields(sample, payload))
+
     if not payload.get("database", {}).get("saved"):
         problems.append(f"not stored: {payload.get('database', {}).get('error')}")
     return problems
+
 
 
 def stored_rows(db_path: Path) -> tuple[list[tuple], int]:
@@ -90,9 +117,11 @@ def stored_rows(db_path: Path) -> tuple[list[tuple], int]:
         if pages_table is None:
             raise LookupError(f"no '*_pages' table in the store, only {tables}")
         extractions = connection.execute(
-            "SELECT `id`, `filename`, `kind`, `page_count`, `char_count`, `content_sha256` "
+            "SELECT `id`, `filename`, `kind`, `page_count`, `char_count`, `content_sha256`, "
+            "`supplier`, `invoice_number`, `total_amount`, `currency` "
             "FROM `ocr_extractions` ORDER BY `id`"
         ).fetchall()
+
         pages = connection.execute(f"SELECT COUNT(*) FROM `{pages_table}`").fetchone()[0]
     finally:
         connection.close()
@@ -159,8 +188,9 @@ def main(argv: list[str] | None = None) -> int:
 
     header = (
         f"{'file':<40} {'HTTP':>5} {'kind':<6} {'pages':>5} {'extract':<9} "
-        f"{'chars':>6} {'conf':>6} {'record':>7}  verdict"
+        f"{'chars':>6} {'conf':>6} {'fields':>6} {'record':>7}  verdict"
     )
+
     print(header)
     print("-" * len(header))
 
@@ -190,14 +220,18 @@ def main(argv: list[str] | None = None) -> int:
             if problems:
                 failures.extend(f"{sample.relative_path}: {problem}" for problem in problems)
             confidence = payload.get("confidence")
+            fields = payload.get("fields") or {}
+            found = sum(1 for value in fields.values() if value)
             print(
                 f"{sample.relative_path:<40} {response.status_code:>5} "
                 f"{str(payload.get('kind', '-')):<6} {str(payload.get('page_count', '-')):>5} "
                 f"{sample.method:<9} {str(payload.get('char_count', '-')):>6} "
                 f"{(f'{confidence:.1f}' if confidence is not None else '-'):>6} "
+                f"{(f'{found}/{len(fields)}' if fields else '-'):>6} "
                 f"{str(payload.get('database', {}).get('record_id') or '-'):>7}  "
                 f"{'ok' if not problems else 'FAIL'}"
             )
+
 
         # -- the store: the API and raw SQL must agree with what was uploaded
         listing = client.get("/api/database/records").get_json()
@@ -210,8 +244,11 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             print(
                 f"  #{row[0]:<3} {row[1]:<34} {row[2]:<6} pages={row[3]} "
-                f"chars={row[4]} sha256={str(row[5])[:12]}"
+                f"chars={row[4]} fields=({row[6] or '-'}, {row[7] or '-'}, "
+                f"{row[8] if row[8] is not None else '-'}, {row[9] or '-'}) "
+                f"sha256={str(row[5])[:12]}"
             )
+
 
         if listing["query"]["total"] != len(SAMPLES) or len(rows) != len(SAMPLES):
             failures.append("the store does not hold one record per sample")
