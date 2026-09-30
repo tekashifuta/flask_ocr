@@ -10,6 +10,7 @@
     initSubmitSpinner();
     initReviewForm();
     initDatabaseForm();
+    initHelpTips();
   });
 
   /* ---------- drag & drop + client side pre-validation ---------- */
@@ -324,6 +325,54 @@
           busy(false);
           show("The request failed - check that the server is still running.", true);
         });
+    });
+  }
+
+  /* ---------- the question mark beside a title ---------- */
+  /* Hover and keyboard focus open the popup through CSS (`.help-tip:hover`,
+     `:focus-within`); this adds the two things CSS cannot do on its own: a tap
+     toggles it on a touch screen, and Escape or a click elsewhere closes it. */
+  function initHelpTips() {
+    var tips = document.querySelectorAll(".help-tip");
+    if (!tips.length) return;
+
+    function close(tip) {
+      tip.classList.remove("is-open");
+      var button = tip.querySelector(".help-tip-button");
+      if (button) button.setAttribute("aria-expanded", "false");
+    }
+
+    function closeAll() {
+      document.querySelectorAll(".help-tip.is-open").forEach(close);
+    }
+
+    tips.forEach(function (tip) {
+      var button = tip.querySelector(".help-tip-button");
+      if (!button) return;
+
+      button.addEventListener("click", function () {
+        var open = !tip.classList.contains("is-open");
+        closeAll();
+        tip.classList.toggle("is-open", open);
+        button.setAttribute("aria-expanded", open ? "true" : "false");
+      });
+
+      /* The pointer left the icon and its popup: nothing should stay open. */
+      tip.addEventListener("mouseleave", function () { close(tip); });
+      tip.addEventListener("focusout", function () {
+        window.setTimeout(function () {
+          if (!tip.contains(document.activeElement)) close(tip);
+        }, 0);
+      });
+    });
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") closeAll();
+    });
+
+    document.addEventListener("click", function (event) {
+      if (event.target instanceof Element && event.target.closest(".help-tip")) return;
+      closeAll();
     });
   }
 })();

@@ -1122,8 +1122,14 @@ def _local_path(value: object) -> str | None:
     return target
 
 
-def _render_database_page(*, error=None, message=None, form=None, status=200):
-    """Connection form + live status.  The stored rows are browsed in the records view."""
+def _render_database_page(*, error=None, message=None, form=None, status=200, open_panel=None):
+    """Connection form + live status.  The stored rows are browsed in the records view.
+
+    ``open_panel`` names the folded panel the page unfolds (``sqlite`` or ``status``):
+    the one the request was about, so the result of pressing its button is never hidden
+    behind a collapsed summary.  The MySQL form is on screen at all times, so a
+    submitted MySQL backend has no panel of its own to unfold.
+    """
     manager = _database()
     html = render_template(
         "database.html",
@@ -1132,6 +1138,7 @@ def _render_database_page(*, error=None, message=None, form=None, status=200):
         message=message,
         form={**manager.form_defaults(), **(form or {})},
         limits=upload_limits(),
+        open_panel=open_panel,
     )
     return html, status
 
@@ -1161,9 +1168,14 @@ def database_connect():
     except DatabaseError as exc:
         logger.error("Database connect failed: %s", exc.message)
         return _render_database_page(
-            error=exc.message, form=_form_values(form), status=exc.status_code
+            error=exc.message,
+            form=_form_values(form),
+            status=exc.status_code,
+            open_panel=form.get("backend"),
         )
-    return _render_database_page(message=_schema_message(_database_status_payload()))
+    return _render_database_page(
+        message=_schema_message(_database_status_payload()), open_panel="status"
+    )
 
 
 @bp.post("/database/disconnect")
@@ -1179,13 +1191,15 @@ def database_ensure_schema():
     try:
         created = _database().ensure_schema()
     except DatabaseError as exc:
-        return _render_database_page(error=exc.message, status=exc.status_code)
+        return _render_database_page(
+            error=exc.message, status=exc.status_code, open_panel="status"
+        )
     message = (
         "Created the missing tables."
         if created
         else "The schema and both tables already exist - nothing to create."
     )
-    return _render_database_page(message=message)
+    return _render_database_page(message=message, open_panel="status")
 
 
 @bp.post("/database/forget")
@@ -1197,7 +1211,7 @@ def database_forget():
         if forgotten
         else "There were no saved connection details to delete."
     )
-    return _render_database_page(message=message)
+    return _render_database_page(message=message, open_panel="status")
 
 
 @bp.get("/database/records")

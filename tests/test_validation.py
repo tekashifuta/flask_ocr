@@ -6,6 +6,8 @@ Tesseract installed.
 
 from __future__ import annotations
 
+import re
+
 
 # ---------------------------------------------------------------------------
 # pages
@@ -18,6 +20,27 @@ def test_index_renders_upload_form(client):
     assert 'name="file" multiple' in body, "a batch is one form submission"
     assert "Files per batch" in body
     assert "review them before anything is saved" in body
+
+
+def test_only_the_store_panel_folds_away(client):
+    """The upload explanation moved into the question mark: one accordion is left."""
+    body = client.get("/").get_data(as_text=True)
+
+    assert body.count('<details class="panel panel-muted accordion"') == 1
+    assert body.count("<summary>") == 1, "the store panel is toggled by its own heading"
+    assert "<h2>Database storage (MySQL)</h2>" in body
+    assert not re.findall(r"<details[^>]*\bopen\b", body), "nothing is unfolded to start with"
+
+
+def test_the_upload_explanation_hangs_off_the_question_mark(client):
+    """*What happens to your file* is the popup of the ``?``, not a panel of its own."""
+    body = client.get("/").get_data(as_text=True)
+
+    assert '<div class="help-tip-popup" id="upload-help" role="tooltip">' in body
+    assert 'aria-describedby="upload-help"' in body
+    assert '<p class="help-tip-title">What happens to your file</p>' in body
+    assert "Only after you confirm or correct them" in body, "the steps are still there"
+    assert "Max PDF pages" in body and "OCR language" in body, "the limits are still there"
 
 
 def test_health_endpoint_reports_engine(client):

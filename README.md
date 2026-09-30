@@ -309,7 +309,10 @@ Every stored row is browsed in the **records view** (`/database/records`), not o
 count - and links to the table. The records view lists every record by default (id,
 file name, supplier/no./date/total, upload time, pages, characters, confidence, a text
 snippet) with links to re-open the text, download it as `.txt` or delete the row.
-Deleting returns to the list, with the search still applied.
+Deleting returns to the list, with the search still applied. A row is one line tall: a
+long file name, summary or snippet is cut off with an ellipsis and its full text is the
+cell's tooltip, and a row wider than the card scrolls inside the table while *Actions*
+stays pinned to its right edge (see `notes/21_records_row_is_one_line.md`).
 
 
 ### Records view - browsing and searching what is stored
@@ -870,7 +873,7 @@ Everything below was verified together on **Python 3.14.6 / Windows 11
 | **Database** (default store) | **SQLite** | 3.50.4, via the standard library `sqlite3` of Python 3.14.6 | one file, no server, no credentials, nothing to install |
 | Excel export | *standard library only* | `zipfile` + `xml` | no pandas, no openpyxl (see §5) |
 | Front end | *none* | hand written CSS + vanilla JavaScript | no CDN, no build step, works offline |
-| Tests | pytest | 9.1.1 | 301 tests |
+| Tests | pytest | 9.1.1 | 307 tests |
 | Packaging | *standard library only* | `zipfile` via `tools/package_submission.py` | builds the submission archive |
 | Development machine | Windows 11 (10.0.26100), VS Code | | `winget` used for Tesseract, `py -3.14 -m venv` for the environment |
 
@@ -887,7 +890,7 @@ following was used while building this project:
 | **Cline** (AI coding agent in VS Code) | Drafted and refactored implementation code (`app/ocr/*`, `app/database.py`, `app/sqlite.py`, `app/excel.py`, `app/routes.py`, templates), wrote the test suite and the documentation, generated `sql/*.sql`, `samples/` and the scripts in `tools/`, and diagnosed the bugs written up in `notes/` |
 
 **Every AI-assisted change was reviewed by reading it and verifying it by running
-it** - `pytest -q` (301 tests), `tools/verify_samples.py` (the six sample files
+it** - `pytest -q` (307 tests), `tools/verify_samples.py` (the six sample files
 through the real HTTP stack and a real SQLite store), the schema/seed comparison
 for `sql/sqlite_schema.sql`, and a live server smoke test (§14). Nothing is in the
 repository that was not executed at least once. No AI tool has access to any
@@ -1013,7 +1016,7 @@ never have to be committed by hand.
 ```powershell
 env\Scripts\python.exe tools\make_samples.py       # (re)write samples/ and print a manifest
 env\Scripts\python.exe tools\verify_samples.py     # upload every sample and check the result
-env\Scripts\python.exe -m pytest -q                # 301 tests
+env\Scripts\python.exe -m pytest -q                # 307 tests
 ```
 
 `tools/verify_samples.py` builds the real application (pointed at a throw-away
@@ -1065,7 +1068,7 @@ six sample files) is missing or the archive is corrupt.
 
 | Check | Result |
 |---|---|
-| `pytest -q` (whole suite) | **301 passed** in ~10 s |
+| `pytest -q` (whole suite) | **307 passed** in ~10 s |
 | `tools/verify_samples.py` | **6/6** sample files, 6 records and 8 page rows in a real SQLite file, including the structured fields read back with plain SQL |
 | The review flow (live server) | `POST /upload` with two files -> review page (2 cards, fields pre-filled, **no** record written); correcting a total and saving -> *Stored in SQLite as record #1, #2*; an unreadable amount -> `400` with the message next to the field and nothing stored; `/database/records` shows the reviewed supplier/no./date/total |
 | `sql/sqlite_schema.sql` | applied **twice** (idempotent), then compared with the database the application creates: identical `sqlite_master` DDL and identical `PRAGMA table_info` columns; the seed digests re-computed with `hashlib` match; the app lists, searches (`q=ALPHA`), opens and exports the seeded records |

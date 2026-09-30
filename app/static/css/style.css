@@ -90,6 +90,13 @@ code, pre, textarea {
   padding: clamp(1rem, 3vw, 2rem) clamp(1rem, 4vw, 2.5rem) 3rem;
 }
 
+/* A grid item is never allowed to be narrower than its content by default
+   (``min-width: auto``), so one wide row - the records table, whose cells do not
+   wrap - used to stretch every card with it and push the page past the window.
+   Zero keeps a card at the width of the grid and lets the table scroll inside
+   ``.records-wrap``, which is what that wrapper is there for. */
+.layout > * { min-width: 0; }
+
 .site-footer {
   padding: 1rem clamp(1rem, 4vw, 2.5rem) 2.5rem;
   max-width: 1080px;
@@ -123,6 +130,249 @@ h3 { margin: 0; font-size: 1rem; }
   color: var(--text-muted);
 }
 .error-code { margin: .25rem 0 1.25rem; color: var(--text-muted); font-size: .85rem; }
+
+/* ---------- a title and its question mark ---------- */
+/* What a card's opening paragraph used to say hangs off the question mark now: the upload
+   page's *What happens to your file* and the storage page's two lede paragraphs.  The icon
+   is the last item of the panel head on the upload page - the *lower right* corner of its
+   heading - and the last item of the title row on the storage page, right after the words.
+   The popup is opened by hovering the icon, by focusing it with the keyboard
+   (``:focus-within``) or by tapping it (``.is-open``, set by app.js).  Everything stays in
+   the DOM, so the text is still there for a screen reader through ``aria-describedby``. */
+.panel-head {
+  position: relative;
+  display: flex;
+  /* Wrap is what keeps a long heading, a badge and a button from squeezing each other
+     on a phone: a text block that does not fit drops to a line of its own instead. */
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: .35rem 1rem;
+  margin-bottom: 1.25rem;
+}
+
+/* ``flex-basis: 0`` sizes the heading from the space that is left over, so it wraps its
+   own text and the icon stays on the same row with it, at the right edge - however
+   narrow the window gets.  ``align-items: flex-end`` pins the icon to the bottom of that
+   row, which is its "lower right" corner. */
+.panel-head h1 { flex: 1 1 0; min-width: 0; margin: 0; }
+
+/* A heading that has an eyebrow above it: the eyebrow and the title are one item of the
+   row, so a badge, a button and the ``?`` after it keep their places.  It is sized from
+   the width that is left over (like the heading itself), so it wraps its own text - and
+   it has a floor, so on a phone it takes a line of its own rather than being squeezed
+   to a sliver by the badge, the button and the icon. */
+.panel-head-text { display: grid; gap: .2rem; flex: 1 1 14rem; min-width: 0; }
+
+/* A title that carries its question mark *right after the words* (the storage page): the
+   two are one row, and the row is only as wide as the words plus the icon - so the icon
+   follows the last word instead of being pushed to the far edge of the card.  It is
+   ``position: relative`` on purpose: the icon inside it is *not* positioned, so the popup
+   and the caret are measured against this row (see below) - and, the row being exactly as
+   wide as its content, its right edge *is* the icon's right edge.  ``max-width: 100%`` is
+   what keeps a long heading wrapping inside the panel instead of overflowing it. */
+.panel-head-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* Inside that row the heading is sized by its own words rather than by the width that is
+   left over - the row is already narrowed to exactly those words.  ``align-items:
+   center`` above is what lines the round icon up with the title's own line box, the place
+   a reader looks for a ``?`` that belongs to the words beside it. */
+.panel-head-title > h1 { flex: 0 1 auto; }
+
+/* A badge and a button beside a heading stay at the top of the row (the alignment they
+   get in ``.result-head``), while the heading - and the question mark that belongs to it -
+   keep the bottom. */
+.panel-head > .result-actions { align-self: flex-start; }
+
+/* The icon is a flex item of that row.  It is deliberately *not* positioned: the popup
+   and its caret are measured against the row it sits in instead (see below), which is the
+   one box that cannot leave the panel. */
+.help-tip { display: inline-flex; flex: none; }
+
+/* An icon that is a direct child of the head (the upload page) is held against the right
+   edge of whatever line it lands on - which is what makes the caret point at it.  One
+   that sits inside a title row (the storage page) follows the words instead. */
+.panel-head > .help-tip { margin-left: auto; }
+
+.help-tip-button {
+  display: inline-grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.help-tip-button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* The same focus ring the field inputs use (2px accent, 1px offset). */
+.help-tip-button:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The popup hangs off the row that the icon closes - the panel head on the upload page,
+   where ``right: 0`` against its right edge (which is the icon's own right edge) and a
+   ``100%`` width cap mean it can never grow past either edge of the panel - and the title
+   row on the storage page, where it is re-anchored below.  ``100%`` rather than ``100vw``
+   is deliberate: ``vw`` counts a scrollbar that is not there.
+
+   It carries a whole explanation now, so it is capped in height and scrolls itself:
+   the wheel then moves the text inside the popup instead of scrolling the page out
+   from under the pointer. */
+.help-tip-popup {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + .55rem);
+  right: 0;
+  width: min(30rem, 100%);
+  max-height: calc(100vh - 15rem);
+  overflow-y: auto;
+  /* ``contain`` keeps the wheel on the popup: without it, scrolling past the end of the
+     text would carry on into the page and move the icon out from under the pointer. */
+  overscroll-behavior: contain;
+  /* A thin, themed scrollbar: this is a card inside a page, not a window of its own. */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 45%, transparent) transparent;
+  padding: .85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text-muted);
+  font-size: .88rem;
+  line-height: 1.55;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-.25rem);
+  transition: opacity .15s ease, transform .15s ease, visibility .15s;
+}
+
+/* The little caret that points back up at the question mark.  It hangs off the icon
+   (so it is only ever drawn where there is one) but, like the popup, it is measured from
+   the row the icon closes: the right edge of the panel head on the upload page (that edge
+   is the icon's own right edge) or of the title row on the storage page, where its offset
+   is overridden below.  It cannot live on the popup: the popup scrolls on a short window,
+   and a scrolling box clips a caret of its own. */
+.help-tip::after {
+  content: "";
+  position: absolute;
+  z-index: 21;
+  top: calc(100% + .13rem);
+  right: .95rem;
+  width: .8rem;
+  height: .8rem;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-.25rem) rotate(45deg);
+  transition: opacity .15s ease, transform .15s ease, visibility .15s;
+}
+
+/* An icon that closes a *title row* (the storage page) rather than an edge of the card:
+   the row is only as wide as the words plus the icon, so the ``100%`` cap above would
+   squeeze the explanation down to that width.  The cap is the viewport instead, and with
+   the popup's left edge on the row's left edge - the start of the title - the whole card
+   stays inside the window at every width, a 390px phone included. */
+.panel-head-title .help-tip-popup {
+  right: auto;
+  left: 0;
+  width: min(30rem, calc(100vw - 6rem));
+}
+
+/* The icon is the last item of that row, so its centre is half an icon in from the row's
+   right edge - which is where the caret's tip belongs (the caret's box is .8rem wide, so
+   its centre is .4rem in from that box's right edge). */
+.panel-head-title .help-tip::after { right: calc(1.45rem / 2 - .4rem); }
+
+.help-tip:hover .help-tip-popup,
+.help-tip:focus-within .help-tip-popup,
+.help-tip.is-open .help-tip-popup {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.help-tip:hover::after,
+.help-tip:focus-within::after,
+.help-tip.is-open::after {
+  opacity: 1;
+  visibility: visible;
+  transform: rotate(45deg);
+}
+
+/* The popup holds a whole explanation now - a title, a paragraph, the steps and the
+   limits - so its text is set like a small card rather than like a one line hint. */
+.help-tip-popup p { margin: 0 0 .6rem; }
+.help-tip-popup .help-tip-title { margin-bottom: .45rem; color: var(--text); font-weight: 700; }
+.help-tip-popup .facts { margin-top: .9rem; }
+
+/* ---------- accordions ---------- */
+/* A secondary panel folds its body away: the panel itself is the ``<details>`` and
+   the heading is its ``<summary>``, so the whole header line toggles it and no
+   JavaScript is involved.  The panel's padding moves to the header and the body -
+   that is what makes the header clickable edge to edge - and the chevron is two
+   borders of a square, turned into a ``v`` and back. */
+.accordion { padding: 0; }
+
+.accordion > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .2rem .75rem;
+  padding: clamp(1.1rem, 2.5vw, 1.75rem);
+  border-radius: var(--radius);
+  cursor: pointer;
+  list-style: none;
+}
+
+.accordion > summary::-webkit-details-marker { display: none; }
+.accordion > summary:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.accordion > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The eyebrow keeps a line to itself; the heading shares its line with any badge
+   and the chevron.  ``flex-basis: 0`` is what keeps them on that line - the heading
+   is sized by the space that is left over, so it wraps its own text instead of
+   pushing the badge and the chevron onto a line below. */
+.accordion > summary > .eyebrow { flex: 0 0 100%; }
+.accordion > summary h2,
+.accordion > summary h3 { flex: 1 1 0; min-width: 0; margin: 0; }
+
+.accordion > summary::after {
+  content: "";
+  flex: none;
+  width: .55rem;
+  height: .55rem;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: translateY(-.15rem) rotate(45deg);
+  transition: transform .15s ease;
+}
+
+.accordion[open] > summary { padding-bottom: .6rem; }
+.accordion[open] > summary::after { transform: translateY(.15rem) rotate(225deg); }
+
+/* Same horizontal padding as the header, plus no leading gap of its own. */
+.accordion-body { padding: 0 clamp(1.1rem, 2.5vw, 1.75rem) clamp(1.1rem, 2.5vw, 1.75rem); }
+.accordion-body > :first-child { margin-top: 0; }
 
 /* ---------- upload form ---------- */
 .dropzone {
@@ -227,6 +477,11 @@ h3 { margin: 0; font-size: 1rem; }
 }
 
 /* ---------- database form ---------- */
+/* The heading of a form that sits inside a card whose own heading is above it: the
+   panel head has already left 1.25rem of air, so this top margin only shows when a
+   notice was rendered in between. */
+.form-title { margin-top: .9rem; }
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -309,9 +564,11 @@ h3 { margin: 0; font-size: 1rem; }
   font-size: .88rem;
 }
 
+/* Tight rows: one line of text per row, and ``vertical-align: middle`` keeps every
+   cell - the one word numbers as much as the buttons - on that single line. */
 .records th,
 .records td {
-  padding: .5rem .6rem;
+  padding: .3rem .6rem;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
@@ -326,10 +583,49 @@ h3 { margin: 0; font-size: 1rem; }
 }
 
 .records tr:hover td { background: var(--surface-muted); }
-.records .cell-file { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; }
-.records .cell-preview { max-width: 26rem; white-space: normal; color: var(--text-muted); }
-.records .cell-actions { display: flex; gap: .35rem; align-items: center; }
-.records .cell-actions form { display: inline; }
+
+/* A long file name, a long "supplier / no. / date / total" summary and a long
+   snippet used to wrap onto four or five lines and stretch the whole row with
+   them.  Each of the three is now cut off with an ellipsis on the row's single
+   line; the full text stays readable as the cell's ``title`` (a hover tooltip),
+   which is what the template puts on it. */
+.records .cell-file,
+.records .cell-fields,
+.records .cell-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.records .cell-file { max-width: 18rem; }
+.records .cell-fields { max-width: 20rem; font-size: .84rem; color: var(--text-muted); }
+.records .cell-preview { max-width: 20rem; color: var(--text-muted); }
+
+/* The two buttons live in a wrapper *inside* the cell: ``display: flex`` on the
+   ``<td>`` itself drops its table-cell box and with it ``vertical-align``, which
+   is what used to leave them hanging at the top of a tall row. */
+.records td.cell-actions { vertical-align: middle; }
+.records .cell-actions-inner { display: flex; align-items: center; gap: .35rem; }
+.records .cell-actions-inner form { display: inline; }
+
+/* The widest row is wider than the card, so the table scrolls sideways inside
+   ``.records-wrap``.  *Actions* is pinned to the right edge of that scroll area so
+   the row's ``.txt``/``Delete`` stay reachable without scrolling to the end of the
+   row.  A sticky cell paints its own background, otherwise the row shows through. */
+.records th.cell-actions,
+.records td.cell-actions {
+  position: sticky;
+  right: 0;
+  background: var(--surface);
+  /* A hairline marks where the row is cut off - without it the half-hidden letters
+     of the column underneath look like a rendering accident. */
+  box-shadow: inset 1px 0 0 var(--border);
+}
+
+/* The row's hover colour has to cover the pinned cell as well, or a muted row would
+   keep one bright cell at its right edge. */
+.records tr:hover td.cell-actions { background: var(--surface-muted); }
+
 .records .records-empty { color: var(--text-muted); font-style: italic; white-space: normal; }
 
 /* ---------- records paging ---------- */
@@ -514,8 +810,6 @@ h3 { margin: 0; font-size: 1rem; }
 /* The batch drop zone lists what was selected */
 .dropzone-list { margin: .6rem 0 0; padding: 0; list-style: none; font-size: .85rem; color: var(--text-muted); }
 .dropzone-list li { padding: .1rem 0; word-break: break-word; }
-
-.records .cell-fields { max-width: 24rem; white-space: normal; font-size: .84rem; color: var(--text-muted); }
 
 @media (max-width: 640px) {
   .result-actions, .actions { width: 100%; }

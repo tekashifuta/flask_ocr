@@ -1008,6 +1008,49 @@ def test_database_page_renders_the_connection_form(client):
     assert "Connect &amp; create schema" in body
     assert "Not connected" in body
     assert "ocr_extractions" in body
+    assert '<h2 class="form-title">MySQL server</h2>' in body, (
+        "the form names the store it connects"
+    )
+    assert body.count("<details") == 2, "only the SQLite form and the status fold away"
+
+
+def test_the_storage_details_hang_off_the_question_mark(client):
+    """Both lede paragraphs are the popup of the ``?``, not text around the form."""
+    body = client.get("/database").get_data(as_text=True)
+
+    assert '<div class="help-tip-popup" id="storage-help" role="tooltip">' in body
+    assert 'aria-describedby="storage-help"' in body
+    assert '<p class="help-tip-title">Where the extracted text is kept</p>' in body
+
+    icon = body.index('id="storage-help"')
+    form = body.index('<h2 class="form-title">MySQL server</h2>')
+    assert icon < body.index("never costs you an extraction") < form, (
+        "the storage paragraph hangs off the icon, above the form"
+    )
+    assert icon < body.index("CREATE DATABASE IF NOT EXISTS") < form, (
+        "and so does what connecting creates - nothing is left lying between the two"
+    )
+    assert "ocr_extractions_pages" in body, "the pages table is still named"
+
+
+def test_the_storage_question_mark_sits_beside_the_title(client):
+    """The ``?`` closes the title row - it is not a third item of the panel head.
+
+    Note 20: it moved from the lower right of the card (after the badge and the
+    records-view button) to right after the words ``MySQL storage``, where the CSS lines
+    it up with the title's own line box.
+    """
+    body = client.get("/database").get_data(as_text=True)
+
+    row = body.index('<div class="panel-head-title">')
+    title = body.index("<h1>MySQL storage</h1>", row)
+    icon = body.index('<div class="help-tip">', title)
+    actions = body.index('<div class="result-actions">', title)
+
+    assert row < title < icon < actions, (
+        "the icon follows the title inside the title row, before the badge and the button"
+    )
+    assert body.count('<div class="panel-head-title">') == 1, "one title, one title row"
 
 
 def test_database_page_is_linked_from_every_page(client):
@@ -1025,7 +1068,13 @@ def test_database_page_reports_a_failed_connect_and_keeps_the_form(
 
     response = client.post(
         "/database/connect",
-        data={"host": "db.invalid", "port": "3307", "user": "ocr", "password": "s3cret"},
+        data={
+            "backend": "mysql",
+            "host": "db.invalid",
+            "port": "3307",
+            "user": "ocr",
+            "password": "s3cret",
+        },
     )
     body = response.get_data(as_text=True)
 
@@ -1034,6 +1083,10 @@ def test_database_page_reports_a_failed_connect_and_keeps_the_form(
     assert 'value="db.invalid"' in body, "what the user typed is kept"
     assert 'value="3307"' in body
     assert "s3cret" not in body, "the password is never echoed back"
+    assert 'id="db-host"' in body, "the form is on screen, with the message"
+    assert '<details class="panel accordion"' not in body, (
+        "the MySQL form is never folded away, so a failed connect has nothing to unfold"
+    )
 
 
 def test_database_page_rejects_an_incomplete_form(make_client, tmp_path):

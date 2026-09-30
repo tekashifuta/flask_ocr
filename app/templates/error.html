@@ -20,12 +20,16 @@
   {% endif %}
 </section>
 
-<aside class="panel panel-muted">
-  <h2>Accepted input</h2>
-  <dl class="facts">
-    <div><dt>Allowed types</dt><dd>{{ limits.allowed_extensions }}</dd></div>
-    <div><dt>Max size</dt><dd>{{ limits.max_upload }}</dd></div>
-    <div><dt>Max PDF pages</dt><dd>{{ limits.max_pdf_pages }}</dd></div>
-  </dl>
-</aside>
+<details class="panel panel-muted accordion">
+  <summary>
+    <h2>Accepted input</h2>
+  </summary>
+  <div class="accordion-body">
+    <dl class="facts">
+      <div><dt>Allowed types</dt><dd>{{ limits.allowed_extensions }}</dd></div>
+      <div><dt>Max size</dt><dd>{{ limits.max_upload }}</dd></div>
+      <div><dt>Max PDF pages</dt><dd>{{ limits.max_pdf_pages }}</dd></div>
+    </dl>
+  </div>
+</details>
 {% endblock %}

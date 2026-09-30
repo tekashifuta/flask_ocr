@@ -36,6 +36,7 @@ from app.exceptions import (
     DatabaseWriteError,
     InvalidDatabaseSettingsError,
 )
+from app.fields import DocumentFields
 from app.ocr import ExtractionResult, PageResult
 from app.sqlite import (
     MEMORY_PATH,
@@ -544,6 +545,42 @@ def test_database_page_offers_the_sqlite_form(client):
     assert "Connect SQLite file" in body
 
 
+def test_the_store_panels_fold_away_and_reopen_for_the_store_that_was_used(
+    make_client, tmp_path
+):
+    """The two folded sections; the one a request was about unfolds itself."""
+    path = str(tmp_path / "ocr.sqlite3")
+    client = make_client(DATABASE_BACKEND=BACKEND_SQLITE, SQLITE_PATH=path)
+
+    fresh = client.get("/database").get_data(as_text=True)
+    assert fresh.count("<details") == 2, "the SQLite form and the connection status"
+    assert not unfolded(fresh), "a fresh visit opens none of them"
+    assert 'id="db-host"' in fresh, "the MySQL form is on screen, never folded away"
+
+    failed = client.post(
+        "/database/connect", data={"backend": BACKEND_SQLITE, "path": str(tmp_path)}
+    )
+    assert failed.status_code == 503
+    assert "Use a local SQLite file" in unfolded(failed.get_data(as_text=True))
+
+    connected = client.post(
+        "/database/connect", data={"backend": BACKEND_SQLITE, "path": path}
+    )
+    assert connected.status_code == 200
+    assert "Connection status" in unfolded(
+        connected.get_data(as_text=True)
+    ), "the state that just changed is unfolded, not folded away"
+
+
+def unfolded(body: str) -> str:
+    """The ``<details>`` panels rendered with ``open``, joined into one string."""
+    return "".join(
+        panel.group(0)
+        for panel in re.finditer(r"<details[^>]*>.*?</details>", body, re.DOTALL)
+        if re.search(r"<details[^>]*\bopen\b", panel.group(0))
+    )
+
+
 def test_the_upload_page_names_the_configured_store(make_client, tmp_path, text_pdf_factory):
     path = str(tmp_path / "ocr.sqlite3")
     client = make_client(DATABASE_BACKEND=BACKEND_SQLITE, SQLITE_PATH=path)
@@ -694,6 +731,41 @@ def test_records_view_lists_every_stored_record(make_client, tmp_path):
     empty = page_text(client.get("/database/records?q=doc-99"))
     assert "Nothing stored yet" not in empty
     assert "No stored record matches that search" in empty
+
+
+def test_records_row_keeps_the_full_cell_text_when_it_is_truncated(make_client, tmp_path):
+    """A row is one line tall: a long cell is cut off, so its full text travels as
+    the cell's ``title`` (the hover tooltip), and the two buttons sit in their own
+    wrapper inside the cell - which is what lets ``vertical-align`` centre them on
+    that line instead of ``display: flex`` turning the ``<td>`` into a block."""
+    path = str(tmp_path / "titles.sqlite3")
+    client = make_client(DATABASE_BACKEND=BACKEND_SQLITE, SQLITE_PATH=path)
+    client.post("/database/connect", data={"backend": BACKEND_SQLITE, "path": path})
+    manager = client.application.extensions["ocr_database"]
+    manager.save_extraction(
+        sample_result("Apr_15_2_RMAVZ.pdf"),
+        fields=DocumentFields.from_mapping(
+            {
+                "supplier": "PRYCE GASES INCORPORATED",
+                "invoice_number": "PGI-25-0155",
+                "document_date": "2026-03-24",
+                "total_amount": "623.00",
+            }
+        ),
+    )
+
+    body = page_text(client.get("/database/records"))
+
+    summary = "PRYCE GASES INCORPORATED \u00b7 PGI-25-0155 \u00b7 2026-03-24 \u00b7 623.00"
+    assert f'class="cell-fields" title="{summary}"' in body, "the summary on hover"
+    assert (
+        'class="cell-preview" title="----- Page 1 of 2 -----' in body
+    ), "the snippet on hover - and its line breaks collapsed to spaces"
+    assert 'title="Apr_15_2_RMAVZ.pdf"' in body, "the whole file name on hover"
+    assert (
+        '<td class="cell-actions"> <div class="cell-actions-inner">' in body
+    ), "the buttons are wrapped inside the cell, not the cell itself"
+    assert ".txt</a>" in body and "Delete</button>" in body
 
 
 def test_records_view_pages_rows_with_working_navigation(make_client, tmp_path):

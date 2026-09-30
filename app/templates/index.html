@@ -3,14 +3,47 @@
 
 {% block content %}
 <section class="panel">
-  <h1>Extract data from images and PDFs</h1>
-  <p class="lede">
-    Upload one or more <strong>JPG</strong>, <strong>PNG</strong> or
-    <strong>PDF</strong> files (up to {{ limits.max_batch_files }} per batch).
-    Scanned pages and multi-page PDFs are handled page by page with Tesseract, the
-    structured fields (supplier, invoice number, date, total) are read out of the
-    text, and <strong>you review them before anything is saved</strong>.
-  </p>
+  {#- Everything the old *What happens to your file* panel said now hangs off the
+      question mark at the lower right of the heading: hover (or focus) the icon to
+      read it. -#}
+  <div class="panel-head">
+    <h1>Extract data from images and PDFs</h1>
+    <div class="help-tip">
+      <button class="help-tip-button" type="button"
+              aria-label="What happens to your file: how an upload is checked and processed"
+              aria-describedby="upload-help" aria-expanded="false">?</button>
+      <div class="help-tip-popup" id="upload-help" role="tooltip">
+        <p class="help-tip-title">What happens to your file</p>
+        <p>
+          Upload one or more <strong>JPG</strong>, <strong>PNG</strong> or
+          <strong>PDF</strong> files (up to {{ limits.max_batch_files }} per batch).
+          Scanned pages and multi-page PDFs are handled page by page with Tesseract, the
+          structured fields (supplier, invoice number, date, total) are read out of the
+          text, and <strong>you review them before anything is saved</strong>.
+        </p>
+
+        <ol class="steps">
+          <li>The file signature is checked, so a renamed file is rejected rather than OCR'd.</li>
+          <li>Images are auto-rotated, greyscaled and upscaled for better accuracy.</li>
+          <li>For PDFs, pages that already contain a text layer are read directly; the rest
+              is rendered at {{ limits.dpi }} DPI and passed through Tesseract.</li>
+          <li>Supplier, invoice number, date and total are pulled out of the text and shown
+              as <strong>editable fields</strong> next to it.</li>
+          <li>Only after you confirm or correct them is anything written to
+              {{ store.label }} - and the values you leave in the fields are the ones stored,
+              exported and searched.</li>
+        </ol>
+
+        <dl class="facts">
+          <div><dt>Allowed types</dt><dd>{{ limits.allowed_extensions }}</dd></div>
+          <div><dt>Max size (per upload)</dt><dd>{{ limits.max_upload }}</dd></div>
+          <div><dt>Files per batch</dt><dd>{{ limits.max_batch_files }}</dd></div>
+          <div><dt>Max PDF pages</dt><dd>{{ limits.max_pdf_pages }}</dd></div>
+          <div><dt>OCR language</dt><dd>{{ limits.languages }}</dd></div>
+        </dl>
+      </div>
+    </div>
+  </div>
 
   <form class="upload-form" action="{{ url_for('main.upload') }}" method="post"
         enctype="multipart/form-data" data-max-bytes="{{ limits.max_upload_bytes or '' }}"
@@ -37,65 +70,50 @@
   </form>
 </section>
 
-<aside class="panel panel-muted">
-  <h2>What happens to your file</h2>
-  <ol class="steps">
-    <li>The file signature is checked, so a renamed file is rejected rather than OCR'd.</li>
-    <li>Images are auto-rotated, greyscaled and upscaled for better accuracy.</li>
-    <li>For PDFs, pages that already contain a text layer are read directly; the rest
-        is rendered at {{ limits.dpi }} DPI and passed through Tesseract.</li>
-    <li>Supplier, invoice number, date and total are pulled out of the text and shown
-        as <strong>editable fields</strong> next to it.</li>
-    <li>Only after you confirm or correct them is anything written to
-        {{ store.label }} - and the values you leave in the fields are the ones stored,
-        exported and searched.</li>
-  </ol>
-
-  <dl class="facts">
-    <div><dt>Allowed types</dt><dd>{{ limits.allowed_extensions }}</dd></div>
-    <div><dt>Max size (per upload)</dt><dd>{{ limits.max_upload }}</dd></div>
-    <div><dt>Files per batch</dt><dd>{{ limits.max_batch_files }}</dd></div>
-    <div><dt>Max PDF pages</dt><dd>{{ limits.max_pdf_pages }}</dd></div>
-    <div><dt>OCR language</dt><dd>{{ limits.languages }}</dd></div>
-  </dl>
-</aside>
-
-
-<aside class="panel panel-muted">
-  <h2>Database storage ({{ store.label }})</h2>
-  {% if database.connected %}
-    <p class="lede">
-      <strong>After</strong> you review them, the extracted text and the structured
-      fields are stored in <code>{{ database.settings.database }}</code>
-      (<code>{{ database.settings.table }}</code>) on
-      <code>{{ database.connection_label }}</code> - file name, upload date/time (UTC),
-      content page by page, and the supplier, invoice number, date and total you
-      confirmed.
-    </p>
-    <dl class="facts">
-      <div><dt>Store</dt><dd>{{ store.label }}</dd></div>
-      <div>
-        <dt>{% if database.provider == 'sqlite' %}File{% else %}Server{% endif %}</dt>
-        <dd>{{ database.connection_label }}</dd>
+<details class="panel panel-muted accordion">
+  <summary>
+    <h2>Database storage ({{ store.label }})</h2>
+    {% if database.connected %}
+      <span class="badge badge-embedded">Connected</span>
+    {% else %}
+      <span class="badge badge-ocr">Not connected</span>
+    {% endif %}
+  </summary>
+  <div class="accordion-body">
+    {% if database.connected %}
+      <p class="lede">
+        <strong>After</strong> you review them, the extracted text and the structured
+        fields are stored in <code>{{ database.settings.database }}</code>
+        (<code>{{ database.settings.table }}</code>) on
+        <code>{{ database.connection_label }}</code> - file name, upload date/time (UTC),
+        content page by page, and the supplier, invoice number, date and total you
+        confirmed.
+      </p>
+      <dl class="facts">
+        <div><dt>Store</dt><dd>{{ store.label }}</dd></div>
+        <div>
+          <dt>{% if database.provider == 'sqlite' %}File{% else %}Server{% endif %}</dt>
+          <dd>{{ database.connection_label }}</dd>
+        </div>
+        <div><dt>Stored records</dt><dd>{{ database.record_count if database.record_count is not none else "unknown" }}</dd></div>
+        <div><dt>{{ store.label }} version</dt><dd>{{ database.server_version or "unknown" }}</dd></div>
+      </dl>
+      <div class="actions">
+        <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Manage storage</a>
       </div>
-      <div><dt>Stored records</dt><dd>{{ database.record_count if database.record_count is not none else "unknown" }}</dd></div>
-      <div><dt>{{ store.label }} version</dt><dd>{{ database.server_version or "unknown" }}</dd></div>
-    </dl>
-    <div class="actions">
-      <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Manage storage</a>
-    </div>
-  {% else %}
-    <p class="lede">
-      No {{ store.server_term }} is connected, so extractions only live in the in-memory
-      result cache (they are dropped after {{ limits.result_ttl }}). Connect
-      {{ store.server_phrase }} to keep them: the schema and tables are created
-      automatically on connect. No MySQL server yet? The
-      <a href="{{ url_for('main.database_page') }}">Database</a> page can open a local
-      SQLite file instead, which needs nothing installed.
-    </p>
-    <div class="actions">
-      <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Connect {{ store.server_phrase }}</a>
-    </div>
-  {% endif %}
-</aside>
+    {% else %}
+      <p class="lede">
+        No {{ store.server_term }} is connected, so extractions only live in the in-memory
+        result cache (they are dropped after {{ limits.result_ttl }}). Connect
+        {{ store.server_phrase }} to keep them: the schema and tables are created
+        automatically on connect. No MySQL server yet? The
+        <a href="{{ url_for('main.database_page') }}">Database</a> page can open a local
+        SQLite file instead, which needs nothing installed.
+      </p>
+      <div class="actions">
+        <a class="button button-ghost" href="{{ url_for('main.database_page') }}">Connect {{ store.server_phrase }}</a>
+      </div>
+    {% endif %}
+  </div>
+</details>
 {% endblock %}

@@ -72,7 +72,8 @@
     <thead>
       <tr>
         <th>#</th><th>File name</th><th>Supplier / no. / date / total</th><th>Uploaded (UTC)</th>
-        <th>Type</th><th>Pages</th><th>Chars</th><th>Conf.</th><th>Snippet</th><th>Actions</th>
+        <th>Type</th><th>Pages</th><th>Chars</th><th>Conf.</th><th>Snippet</th>
+        <th class="cell-actions">Actions</th>
       </tr>
     </thead>
     <tbody>
@@ -80,10 +81,11 @@
       <tr>
         <td>{{ record.id }}</td>
         <td class="cell-file">
-          <a href="{{ url_for('main.database_record', record_id=record.id) }}">{{ record.filename }}</a>
+          <a href="{{ url_for('main.database_record', record_id=record.id) }}"
+             title="{{ record.filename }}">{{ record.filename }}</a>
         </td>
-        <td class="cell-fields">
-          {% set summary = records_view.fields_summary.get(record.id) %}
+        {% set summary = records_view.fields_summary.get(record.id) %}
+        <td class="cell-fields"{% if summary %} title="{{ summary }}"{% endif %}>
           {% if summary %}{{ summary }}{% else %}&mdash;{% endif %}
         </td>
         <td>{{ record.uploaded_at }}</td>
@@ -91,15 +93,24 @@
         <td>{{ record.page_count }}</td>
         <td>{{ record.char_count }}</td>
         <td>{% if record.confidence is not none %}{{ record.confidence }}%{% else %}&mdash;{% endif %}</td>
-        <td class="cell-preview">{% if record.preview %}{{ record.preview|trim }}{% else %}&mdash;{% endif %}</td>
+        {% set preview = record.preview if record.preview else '' %}
+        {% set preview = preview|trim|replace('\n', ' ')|replace('\r', ' ') %}
+        <td class="cell-preview"{% if preview %} title="{{ preview }}"{% endif %}>
+          {% if preview %}{{ preview }}{% else %}&mdash;{% endif %}
+        </td>
         <td class="cell-actions">
-          <a class="button button-tiny"
-             href="{{ url_for('main.database_record_download', record_id=record.id) }}">.txt</a>
-          <form action="{{ url_for('main.database_record_delete', record_id=record.id) }}"
-                method="post">
-            <input type="hidden" name="next" value="{{ request.full_path }}">
-            <button class="button button-tiny" type="submit">Delete</button>
-          </form>
+          {# The flex wrapper is inside the cell on purpose: ``display: flex`` on a
+             ``<td>`` would drop its table cell box, so ``vertical-align`` could no
+             longer centre the buttons on the row's single line. #}
+          <div class="cell-actions-inner">
+            <a class="button button-tiny"
+               href="{{ url_for('main.database_record_download', record_id=record.id) }}">.txt</a>
+            <form action="{{ url_for('main.database_record_delete', record_id=record.id) }}"
+                  method="post">
+              <input type="hidden" name="next" value="{{ request.full_path }}">
+              <button class="button button-tiny" type="submit">Delete</button>
+            </form>
+          </div>
         </td>
       </tr>
       {% else %}
